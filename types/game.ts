@@ -59,6 +59,7 @@ export interface GameState {
     message?: string;
   };
   winnerId?: string;
+  consecutiveDoubles?: number;
   chatMessages: ChatMessage[];
   lastPurchase?: {
     cellId: number;

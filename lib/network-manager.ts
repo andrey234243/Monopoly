@@ -29,6 +29,13 @@ export class NetworkManager {
         this.handleConnection(conn);
       });
 
+      this.peer.on('disconnected', () => {
+        this.onConnectionStatus('DISCONNECTED_FROM_SERVER');
+        // Reconnect automatically if it's a temporary disconnect
+        console.warn('Peer disconnected from server, attempting reconnect...');
+        this.peer?.reconnect();
+      });
+
       this.peer.on('error', (err) => {
         console.error('Peer error:', err);
         let status = `ERROR:${err.type}`;
@@ -38,10 +45,14 @@ export class NetworkManager {
           status = 'ERROR:NETWORK_FAILURE';
         } else if (err.type === 'server-error') {
           status = 'ERROR:SERVER_OFFLINE';
+        } else if (err.type === 'disconnected') {
+           // Peer is disconnected from server
+           status = 'ERROR:DISCONNECTED';
+           this.peer?.reconnect();
         }
         this.onConnectionStatus(status);
         // Do not reject here if peer is already open, only reject init
-        if (this.peer?.open === false) reject(err);
+        if (this.peer?.open === false && !this.peer?.disconnected) reject(err);
       });
     });
   }

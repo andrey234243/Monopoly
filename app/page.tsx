@@ -258,9 +258,13 @@ export default function GamePage() {
             if (errType === 'NODE_NOT_FOUND') errorText = 'Узел не найден. Проверьте ID комнаты.';
             else if (errType === 'NETWORK_FAILURE') errorText = 'Сбой сети. Проверьте интернет.';
             else if (errType === 'SERVER_OFFLINE') errorText = 'Сервер сигнализации недоступен.';
+            else if (errType === 'DISCONNECTED') errorText = 'Связь с сервером потеряна. Попытка переподключения...';
             
             notifyError(errorText);
-            setStatus('Готов к подключению');
+            if (errType !== 'DISCONNECTED') setStatus('Готов к подключению');
+        }
+        if (statusMsg === 'DISCONNECTED_FROM_SERVER') {
+            setStatus('Переподключение к серверу...');
         }
         if (statusMsg.startsWith('CONNECTED:')) {
           setIsJoined(true);
@@ -314,8 +318,14 @@ export default function GamePage() {
       };
 
       const engine = new GameEngine([p], onEngineStateChange);
+      const initialState = engine.getState();
+      initialState.roomName = roomSettings.roomName;
+      initialState.maxPlayers = roomSettings.maxPlayers;
+      initialState.initialBalance = roomSettings.initialBalance;
+      initialState.roomPassword = roomSettings.password;
+      
       engineRef.current = engine;
-      setGameState(engine.getState());
+      setGameState(initialState);
       setIsJoined(true);
 
       // Save recent
@@ -533,129 +543,140 @@ export default function GamePage() {
     );
   }
 
-  if (!isJoined) {
-    return (
-      <main className="fixed inset-0 flex flex-col items-center justify-center bg-[#1C1C1D] text-white p-6">
-        <div className="w-full max-w-sm space-y-10">
-          <div className="text-center space-y-2">
-            <h1 className="text-3xl font-black tracking-tight text-[#3390EC]">МАГНАТ</h1>
-            <p className="text-sm text-gray-400">Telegram Edition</p>
-          </div>
-          
-          <div className="bg-[#2C2C2E] rounded-2xl p-4 flex items-center justify-between" onClick={() => setIsSettingsOpen(true)}>
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg overflow-hidden" style={{ backgroundColor: localColor }}>
-                {localAvatar ? (
-                   <img src={localAvatar} alt="Avatar" className="w-full h-full object-cover" />
-                ) : (
-                   localPlayerName.charAt(0).toUpperCase()
-                )}
-              </div>
-              <span className="font-bold">{localPlayerName}</span>
-            </div>
-            <span className="text-[#3390EC] text-sm">Изм.</span>
-          </div>
-
-          <div className="space-y-6">
-            {publicRooms.length > 0 && (
-              <div className="space-y-3">
-                <p className="text-[10px] text-[#3390EC] uppercase font-black text-center tracking-widest">Открытые игры</p>
-                <div className="flex flex-col gap-2 max-h-[160px] overflow-y-auto no-scrollbar pr-1">
-                  {publicRooms.map(room => (
-                    <button 
-                      key={room.id}
-                      onClick={() => joinRoom(room.id)}
-                      disabled={room.isStarted || room.playerCount >= room.maxPlayers}
-                      className="group w-full bg-[#2C2C2E] border border-white/5 p-4 rounded-2xl flex items-center justify-between text-left hover:bg-[#3390EC]/10 transition-colors disabled:opacity-50"
-                    >
-                      <div className="flex flex-col gap-0.5">
-                        <span className="text-sm font-black text-white group-hover:text-[#3390EC] transition-colors">{room.name}</span>
-                        <span className="text-[10px] text-gray-500 uppercase font-bold">Офис {room.hostName}</span>
-                      </div>
-                      <div className="flex flex-col items-end gap-1">
-                        <span className="text-[10px] bg-[#3390EC] text-white px-2 py-0.5 rounded-full font-black">
-                          {room.playerCount}/{room.maxPlayers}
-                        </span>
-                        {room.isStarted && <span className="text-[8px] text-gray-500 font-bold uppercase italic">В игре</span>}
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-3">
-              <button 
-                onClick={startAsHost}
-                className="w-full bg-[#3390EC] text-white p-4 rounded-xl font-bold hover:brightness-110 active:scale-95 transition-all shadow-[0_4px_20px_rgba(51,144,236,0.3)]"
-              >
-                Создать игру
-              </button>
-              {peerId && <p className="text-xs text-center text-gray-400">ID: <span className="font-mono text-white select-all">{peerId}</span></p>}
-            </div>
-
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-700"></div></div>
-              <div className="relative flex justify-center"><span className="bg-[#1C1C1D] px-4 text-xs text-gray-500 uppercase">Или</span></div>
-            </div>
-
-            <div className="space-y-3">
-              <input 
-                type="text" 
-                placeholder="ID Комнаты"
-                value={roomId}
-                onChange={(e) => setRoomId(e.target.value)}
-                className="w-full bg-[#2C2C2E] p-4 rounded-xl text-center text-white focus:ring-2 focus:ring-[#3390EC] outline-none font-mono"
-              />
-              <input 
-                type="password" 
-                placeholder="Пароль (если есть)"
-                value={joiningPassword}
-                onChange={(e) => setJoiningPassword(e.target.value)}
-                className="w-full bg-[#2C2C2E] p-4 rounded-xl text-center text-white focus:ring-2 focus:ring-[#3390EC] outline-none"
-              />
-              <button 
-                onClick={() => joinRoom()}
-                disabled={!roomId}
-                className="w-full bg-white text-[#1C1C1D] p-4 rounded-xl font-bold disabled:opacity-50 active:scale-95 transition-all"
-              >
-                Присоединиться
-              </button>
-            </div>
-
-            {recentRooms.length > 0 && (
-              <div className="space-y-3">
-                <p className="text-[10px] text-gray-500 uppercase font-black text-center tracking-widest">Недавние комнаты</p>
-                <div className="flex flex-col gap-2">
-                  {recentRooms.map(room => (
-                    <button 
-                      key={room.id}
-                      onClick={() => joinRoom(room.id)}
-                      className="w-full bg-[#2C2C2E]/50 border border-white/5 p-3 rounded-xl flex items-center justify-between text-xs font-bold hover:bg-[#2C2C2E] transition-colors"
-                    >
-                      <span className="text-gray-300">{room.name}</span>
-                      <span className="text-[#3390EC] font-mono">{room.id.slice(0, 6)}...</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="absolute bottom-6 text-[10px] text-gray-500 uppercase tracking-widest">
-          {status}
-        </div>
-      </main>
-    );
-  }
-
   // --- HTML DOM BOARD CALCULATION ---
   const cellsToDraw = gameState ? gameState.cells : BOARD_CELLS;
   const isLocalTurn = gameState?.currentPlayerId === localPlayerId;
 
   return (
-    <main className="fixed inset-0 bg-[#1C1C1D] text-white overflow-hidden flex flex-col user-select-none touch-none">
+    <main className="min-h-screen bg-[#1C1C1D] font-sans overflow-hidden">
+      <AnimatePresence mode="wait">
+        {!isJoined ? (
+          <motion.main 
+            key="lobby-main"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 flex flex-col items-center justify-center bg-[#1C1C1D] text-white p-6"
+          >
+            <div className="w-full max-w-sm space-y-10">
+              <div className="text-center space-y-2">
+                <h1 className="text-3xl font-black tracking-tight text-[#3390EC]">МАГНАТ</h1>
+                <p className="text-sm text-gray-400">Telegram Edition</p>
+              </div>
+              
+              <div className="bg-[#2C2C2E] rounded-2xl p-4 flex items-center justify-between" onClick={() => setIsSettingsOpen(true)}>
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg overflow-hidden" style={{ backgroundColor: localColor }}>
+                    {localAvatar ? (
+                       <img src={localAvatar} alt="Avatar" className="w-full h-full object-cover" />
+                    ) : (
+                       localPlayerName.charAt(0).toUpperCase()
+                    )}
+                  </div>
+                  <span className="font-bold">{localPlayerName}</span>
+                </div>
+                <span className="text-[#3390EC] text-sm">Изм.</span>
+              </div>
+
+              <div className="space-y-6">
+                {publicRooms.length > 0 && (
+                  <div className="space-y-3">
+                    <p className="text-[10px] text-[#3390EC] uppercase font-black text-center tracking-widest">Открытые игры</p>
+                    <div className="flex flex-col gap-2 max-h-[160px] overflow-y-auto no-scrollbar pr-1">
+                      {publicRooms.map(room => (
+                        <button 
+                          key={room.id}
+                          onClick={() => joinRoom(room.id)}
+                          disabled={room.isStarted || room.playerCount >= room.maxPlayers}
+                          className="group w-full bg-[#2C2C2E] border border-white/5 p-4 rounded-2xl flex items-center justify-between text-left hover:bg-[#3390EC]/10 transition-colors disabled:opacity-50"
+                        >
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-sm font-black text-white group-hover:text-[#3390EC] transition-colors">{room.name}</span>
+                            <span className="text-[10px] text-gray-500 uppercase font-bold">Офис {room.hostName}</span>
+                          </div>
+                          <div className="flex flex-col items-end gap-1">
+                            <span className="text-[10px] bg-[#3390EC] text-white px-2 py-0.5 rounded-full font-black">
+                              {room.playerCount}/{room.maxPlayers}
+                            </span>
+                            {room.isStarted && <span className="text-[8px] text-gray-500 font-bold uppercase italic">В игре</span>}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-3">
+                  <button 
+                    onClick={() => setIsRoomSettingsOpen(true)}
+                    className="w-full bg-[#3390EC] text-white p-4 rounded-xl font-bold hover:brightness-110 active:scale-95 transition-all shadow-[0_4px_20px_rgba(51,144,236,0.3)]"
+                  >
+                    Создать игру
+                  </button>
+                  {peerId && <p className="text-xs text-center text-gray-400">ID: <span className="font-mono text-white select-all">{peerId}</span></p>}
+                </div>
+
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-700"></div></div>
+                  <div className="relative flex justify-center"><span className="bg-[#1C1C1D] px-4 text-xs text-gray-500 uppercase">Или</span></div>
+                </div>
+
+                <div className="space-y-3">
+                  <input 
+                    type="text" 
+                    placeholder="ID Комнаты"
+                    value={roomId}
+                    onChange={(e) => setRoomId(e.target.value)}
+                    className="w-full bg-[#2C2C2E] p-4 rounded-xl text-center text-white focus:ring-2 focus:ring-[#3390EC] outline-none font-mono"
+                  />
+                  <input 
+                    type="password" 
+                    placeholder="Пароль (если есть)"
+                    value={joiningPassword}
+                    onChange={(e) => setJoiningPassword(e.target.value)}
+                    className="w-full bg-[#2C2C2E] p-4 rounded-xl text-center text-white focus:ring-2 focus:ring-[#3390EC] outline-none"
+                  />
+                  <button 
+                    onClick={() => joinRoom()}
+                    disabled={!roomId}
+                    className="w-full bg-white text-[#1C1C1D] p-4 rounded-xl font-bold disabled:opacity-50 active:scale-95 transition-all"
+                  >
+                    Присоединиться
+                  </button>
+                </div>
+
+                {recentRooms.length > 0 && (
+                  <div className="space-y-3">
+                    <p className="text-[10px] text-gray-500 uppercase font-black text-center tracking-widest">Недавние комнаты</p>
+                    <div className="flex flex-col gap-2">
+                      {recentRooms.map(room => (
+                        <button 
+                          key={room.id}
+                          onClick={() => joinRoom(room.id)}
+                          className="w-full bg-[#2C2C2E]/50 border border-white/5 p-3 rounded-xl flex items-center justify-between text-xs font-bold hover:bg-[#2C2C2E] transition-colors"
+                        >
+                          <span className="text-gray-300">{room.name}</span>
+                          <span className="text-[#3390EC] font-mono">{room.id.slice(0, 6)}...</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="absolute bottom-6 text-[10px] text-gray-500 uppercase tracking-widest">
+              {status}
+            </div>
+          </motion.main>
+        ) : (
+          <motion.main 
+            key="game-main"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-[#1C1C1D] text-white overflow-hidden flex flex-col user-select-none touch-none"
+          >
 
       {/* DASHBOARD TOP */}
       <div className="h-[80px] bg-[#1C1C1D] z-10 flex items-center justify-between px-4 sticky top-0 shrink-0 border-b border-white/5">
@@ -757,36 +778,91 @@ export default function GamePage() {
         )}
 
         {/* LOG IN CENTER */}
-        <div className="absolute inset-0 flex flex-col items-center justify-center z-0 p-16 pointer-events-none">
+        <div className="absolute inset-0 flex flex-col items-center justify-center z-40 p-16 pointer-events-none">
              {gameState ? (
-               <div className="w-full h-full max-w-[200px] flex flex-col items-center justify-center gap-2">
-                 <AnimatePresence>
-                   {gameState.lastRoll && (
-                     <motion.div 
-                       initial={{ opacity: 0, scale: 0.5, y: 20 }}
-                       animate={{ opacity: 1, scale: 1, y: 0 }}
-                       className="flex gap-2 mb-2"
-                     >
-                       <div className="w-10 h-10 bg-[#2C2C2E] rounded-xl flex items-center justify-center text-xl font-black text-[#3390EC] shadow-xl border border-white/5">{displayRoll[0]}</div>
-                       <div className="w-10 h-10 bg-[#2C2C2E] rounded-xl flex items-center justify-center text-xl font-black text-[#3390EC] shadow-xl border border-white/5">{displayRoll[1]}</div>
-                     </motion.div>
-                   )}
-                 </AnimatePresence>
-                 <h1 className="text-2xl font-black text-[#3390EC] opacity-30 tracking-widest mb-4">МАГНАТ</h1>
-                 <div className="flex flex-col items-center gap-2 w-full overflow-hidden">
-                   {gameState.chatMessages.slice(-5).map((msg, i) => (
-                     <motion.div 
-                       initial={{ opacity: 0, scale: 0.9, y: 10 }} 
-                       animate={{ opacity: 1, scale: 1, y: 0 }} 
-                       key={msg.id} 
-                       className="text-center w-full"
-                       style={{ opacity: 1 - (4 - i) * 0.2 }}
-                     >
-                       <span className="text-[10px] font-bold block" style={{ color: gameState.players.find(p => p.id === msg.senderId)?.color }}>{msg.senderName}</span>
-                       <span className="text-[11px] text-gray-300 leading-tight block">{msg.text}</span>
-                     </motion.div>
-                   ))}
-                 </div>
+                <div className="w-full h-full max-w-[300px] flex flex-col items-center justify-center gap-4 pointer-events-auto">
+                 {!gameState.isStarted && gameState.players.find(p => p.id === localPlayerId)?.isHost ? (
+                   <motion.div 
+                     initial={{ opacity: 0, scale: 0.9 }}
+                     animate={{ opacity: 1, scale: 1 }}
+                     className="w-full space-y-6 bg-[#1C1C1D]/80 backdrop-blur-xl p-8 rounded-[32px] border border-white/10 shadow-2xl"
+                   >
+                     <div className="text-center space-y-1">
+                       <h2 className="text-2xl font-black text-[#3390EC] tracking-tighter uppercase leading-none">{roomSettings.roomName || 'ОФИС МАГНАТА'}</h2>
+                       <p className="text-[10px] text-gray-500 font-extrabold uppercase tracking-[0.2em]">{peerId.slice(0, 8)}</p>
+                     </div>
+
+                     <div className="space-y-2 bg-[#2C2C2E]/50 p-4 rounded-2xl border border-white/5">
+                       {gameState.players.map(p => (
+                         <div key={p.id} className="flex items-center justify-between py-1">
+                           <div className="flex items-center gap-3">
+                             <div className="w-8 h-8 rounded-full overflow-hidden flex items-center justify-center border-2 border-[#1C1C1D] shadow-inner" style={{ backgroundColor: p.color }}>
+                               {p.avatarUrl ? (
+                                 <img src={p.avatarUrl} alt={p.name} className="w-full h-full object-cover" />
+                               ) : (
+                                 <span className="text-[10px] font-black text-white">{p.name.charAt(0).toUpperCase()}</span>
+                               )}
+                             </div>
+                             <span className="text-xs font-black text-white uppercase tracking-tight">{p.name} {p.id === localPlayerId ? '(ВЫ)' : ''}</span>
+                           </div>
+                           {p.isHost && <span className="text-[8px] text-[#3390EC] font-black uppercase tracking-widest">Host</span>}
+                         </div>
+                       ))}
+                     </div>
+
+                     <div className="flex flex-col gap-3">
+                       <button 
+                         onClick={() => setIsRoomSettingsOpen(true)}
+                         className="w-full h-14 bg-[#2C2C2E] text-[#3390EC] rounded-2xl font-black text-xs uppercase tracking-[0.2em] border border-[#3390EC]/20 hover:bg-[#3390EC]/10 transition-all active:scale-95"
+                       >
+                         Настройки
+                       </button>
+                       <button 
+                         onClick={handleStartGame}
+                         disabled={gameState.players.length < 2}
+                         className="w-full bg-[#3390EC] text-white h-14 rounded-2xl font-black text-xs uppercase tracking-[0.2em] shadow-lg shadow-[#3390EC]/20 hover:brightness-110 disabled:opacity-50 transition-all active:scale-95"
+                       >
+                         {gameState.players.length < 2 ? 'Ожидание игроков' : 'Начать игру'}
+                       </button>
+                       <button 
+                         onClick={exitRoom}
+                         className="w-full h-10 text-gray-500 font-black uppercase text-[10px] tracking-widest hover:text-white transition-colors"
+                       >
+                         ← Закрыть комнату
+                       </button>
+                     </div>
+                   </motion.div>
+                 ) : (
+                   <>
+                     <AnimatePresence>
+                       {gameState.lastRoll && (
+                         <motion.div 
+                           initial={{ opacity: 0, scale: 0.5, y: 20 }}
+                           animate={{ opacity: 1, scale: 1, y: 0 }}
+                           className="flex gap-2 mb-2"
+                         >
+                           <div className="w-10 h-10 bg-[#2C2C2E] rounded-xl flex items-center justify-center text-xl font-black text-[#3390EC] shadow-xl border border-white/5">{displayRoll[0]}</div>
+                           <div className="w-10 h-10 bg-[#2C2C2E] rounded-xl flex items-center justify-center text-xl font-black text-[#3390EC] shadow-xl border border-white/5">{displayRoll[1]}</div>
+                         </motion.div>
+                       )}
+                     </AnimatePresence>
+                     <h1 className="text-2xl font-black text-[#3390EC] opacity-30 tracking-widest mb-4">МАГНАТ</h1>
+                     <div className="flex flex-col items-center gap-2 w-full overflow-hidden">
+                       {gameState.chatMessages.slice(-5).map((msg, i) => (
+                         <motion.div 
+                           initial={{ opacity: 0, scale: 0.9, y: 10 }} 
+                           animate={{ opacity: 1, scale: 1, y: 0 }} 
+                           key={msg.id} 
+                           className="text-center w-full"
+                           style={{ opacity: 1 - (4 - i) * 0.2 }}
+                         >
+                           <span className="text-[10px] font-bold block" style={{ color: gameState.players.find(p => p.id === msg.senderId)?.color }}>{msg.senderName}</span>
+                           <span className="text-[11px] text-gray-300 leading-tight block">{msg.text}</span>
+                         </motion.div>
+                       ))}
+                     </div>
+                   </>
+                 )}
                </div>
              ) : (
                <h1 className="text-3xl font-black text-[#555] opacity-20 tracking-tighter">МАГНАТ</h1>
@@ -948,14 +1024,19 @@ export default function GamePage() {
                     {/* Player Tokens inside the cell */}
                     {gameState && (
                       <div className="absolute inset-0 flex flex-wrap items-center justify-center gap-0.5 pointer-events-none z-20">
-                         <AnimatePresence>
+                         <AnimatePresence mode="popLayout">
                            {gameState.players.filter(p => p.position === index).map(p => (
                               <motion.div 
                                 key={p.id}
                                 layoutId={`token-${p.id}`}
-                                transition={{ type: "spring", stiffness: 300, damping: 30 }}
-                                className="w-3 h-3 rounded-full ring-2 ring-[#1C1C1D] shadow-lg overflow-hidden flex items-center justify-center"
-                                style={{ backgroundColor: p.color, boxShadow: `0 0 8px ${p.color}` }}
+                                initial={{ scale: 0.5, opacity: 0 }}
+                                animate={{ scale: 1, opacity: 1, y: [0, -10, 0] }}
+                                transition={{ 
+                                  layout: { type: "spring", stiffness: 400, damping: 25 },
+                                  y: { duration: 0.2, ease: "easeOut" }
+                                }}
+                                className="w-4 h-4 sm:w-5 sm:h-5 rounded-full ring-2 ring-[#1C1C1D] shadow-[0_0_20px_rgba(0,0,0,0.6)] overflow-hidden flex items-center justify-center z-30"
+                                style={{ backgroundColor: p.color, boxShadow: `0 0 10px ${p.color}80` }}
                               >
                                 {p.avatarUrl ? (
                                    <img src={p.avatarUrl} alt={p.name} className="w-full h-full object-cover" />
@@ -1129,7 +1210,7 @@ export default function GamePage() {
       </AnimatePresence>
 
       {/* LOBBY VIEW / SETTINGS */}
-      {!gameState?.isStarted && isJoined && (
+      {!gameState?.isStarted && isJoined && !gameState?.players.find(p => p.id === localPlayerId)?.isHost && (
         <div className="absolute inset-0 bg-[#1C1C1D] z-30 flex flex-col items-center justify-center p-6 text-white text-center">
            <div className="w-full max-w-sm space-y-8">
               <div className="space-y-2">
@@ -1155,30 +1236,6 @@ export default function GamePage() {
                  ))}
               </div>
 
-              {gameState?.players.find(p => p.id === localPlayerId)?.isHost && (
-                <div className="space-y-4 pt-6 w-full">
-                   <button 
-                     onClick={() => setIsRoomSettingsOpen(true)}
-                     className="w-full h-14 bg-[#2C2C2E] text-[#3390EC] rounded-2xl font-black text-lg border-2 border-[#3390EC]/20 active:scale-95 transition-all"
-                   >
-                     НАСТРОИТЬ КОМНАТУ
-                   </button>
-                   <button 
-                     onClick={handleStartGame}
-                     disabled={(gameState?.players.length || 0) < 2}
-                     className="w-full bg-[#3390EC] text-white h-14 rounded-2xl font-black text-lg shadow-lg shadow-[#3390EC]/20 active:scale-95 transition-all disabled:opacity-50"
-                   >
-                     НАЧАТЬ ИГРУ
-                   </button>
-                   <button 
-                     onClick={exitRoom}
-                     className="w-full h-12 text-gray-500 font-black uppercase text-xs tracking-widest active:text-white"
-                   >
-                     ← Вернуться на главную
-                   </button>
-                </div>
-              )}
-
               {!gameState?.players.find(p => p.id === localPlayerId)?.isHost && (
                 <div className="space-y-4 w-full">
                   <p className="text-gray-500 animate-pulse italic">Дождитесь, пока хост запустит систему...</p>
@@ -1193,6 +1250,9 @@ export default function GamePage() {
            </div>
         </div>
       )}
+          </motion.main>
+        )}
+      </AnimatePresence>
 
       {/* SURRENDER MODAL */}
       <AnimatePresence>
@@ -1236,30 +1296,30 @@ export default function GamePage() {
       {/* ROOM SETTINGS MODAL */}
       <AnimatePresence>
         {isRoomSettingsOpen && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/90 backdrop-blur-md">
+          <div className="fixed inset-0 z-[105] flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm">
              <motion.div 
-               initial={{ scale: 0.9, opacity: 0 }}
-               animate={{ scale: 1, opacity: 1 }}
-               className="bg-[#1C1C1D] p-6 rounded-3xl w-full max-w-sm space-y-6 border border-white/10"
+               initial={{ opacity: 0, scale: 0.9 }}
+               animate={{ opacity: 1, scale: 1 }}
+               className="w-full max-w-sm bg-[#1C1C1D] p-8 rounded-[32px] border border-white/10 shadow-2xl space-y-6"
              >
                 <div className="text-center relative">
-                  <button 
-                    onClick={() => setIsRoomSettingsOpen(false)}
-                    className="absolute left-0 top-0 w-8 h-8 flex items-center justify-center text-gray-500"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
-                  </button>
-                  <h3 className="text-xl font-black text-[#3390EC] uppercase tracking-widest">Настройки комнаты</h3>
+                   <button 
+                     onClick={() => setIsRoomSettingsOpen(false)}
+                     className="absolute left-0 top-0 w-8 h-8 flex items-center justify-center text-gray-500 hover:text-white transition-colors"
+                   >
+                     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                   </button>
+                   <h3 className="text-xl font-black text-[#3390EC] uppercase tracking-[0.2em]">Настройки</h3>
                 </div>
-                
+
                 <div className="space-y-4">
                    <div>
-                     <p className="text-xs font-bold text-gray-500 uppercase mb-1 ml-1">Название офиса</p>
-                     <input 
-                       className="w-full bg-[#2C2C2E] p-4 rounded-xl text-white font-bold outline-none focus:ring-1 focus:ring-[#3390EC]"
-                       value={roomSettings.roomName}
-                       onChange={(e) => setRoomSettings(prev => ({...prev, roomName: e.target.value}))}
-                     />
+                      <p className="text-xs font-bold text-gray-500 uppercase mb-2 ml-1 tracking-widest">Название офиса</p>
+                      <input 
+                        className="w-full bg-[#2C2C2E] p-4 rounded-xl text-white font-bold outline-none border border-white/5 focus:border-[#3390EC]/40 transition-all"
+                        value={roomSettings.roomName}
+                        onChange={(e) => setRoomSettings(prev => ({...prev, roomName: e.target.value}))}
+                      />
                    </div>
                    <div>
                      <p className="text-xs font-bold text-gray-500 uppercase mb-1 ml-1">Пароль доступа</p>
@@ -1290,22 +1350,35 @@ export default function GamePage() {
                          className="w-full bg-[#2C2C2E] p-4 rounded-xl text-white font-bold outline-none"
                          value={roomSettings.initialBalance}
                          onChange={(e) => setRoomSettings(prev => ({...prev, initialBalance: parseInt(e.target.value)}))}
-                       >
-                         <option value={1000}>$1000</option>
-                         <option value={1500}>$1500</option>
-                         <option value={2000}>$2000</option>
-                         <option value={2500}>$2500</option>
-                       </select>
-                     </div>
-                   </div>
+                      >
+                        <option value={1000}>$1000</option>
+                        <option value={1500}>$1500</option>
+                        <option value={2000}>$2000</option>
+                        <option value={2500}>$2500</option>
+                      </select>
+                    </div>
+                  </div>
                 </div>
 
                 <button 
-                  onClick={() => setIsRoomSettingsOpen(false)} 
+                  onClick={() => {
+                    if (!isJoined) {
+                      startAsHost();
+                    } else if (gameState?.players.find(p => p.id === localPlayerId)?.isHost) {
+                      engineRef.current?.updateSettings({
+                        roomName: roomSettings.roomName,
+                        roomPassword: roomSettings.password,
+                        maxPlayers: roomSettings.maxPlayers,
+                        initialBalance: roomSettings.initialBalance
+                      });
+                    }
+                    setIsRoomSettingsOpen(false);
+                  }} 
                   className="w-full h-14 bg-[#3390EC] text-white rounded-2xl font-black text-lg active:scale-95 transition-all"
                 >
-                  СОХРАНИТЬ
+                  {isJoined ? 'СОХРАНИТЬ' : 'СОЗДАТЬ ОФИС'}
                 </button>
+
              </motion.div>
           </div>
         )}

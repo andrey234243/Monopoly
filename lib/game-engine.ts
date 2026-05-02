@@ -38,6 +38,23 @@ export class GameEngine {
     this.notifyStateChange(prevState);
   }
 
+  public updateSettings(settings: { roomName: string, roomPassword?: string, maxPlayers: number, initialBalance: number }): void {
+    const prevState = JSON.parse(JSON.stringify(this.state));
+    this.state.roomName = settings.roomName;
+    this.state.roomPassword = settings.roomPassword;
+    this.state.maxPlayers = settings.maxPlayers;
+    this.state.initialBalance = settings.initialBalance;
+    
+    // If not started, balance changes can be applied now or wait for start
+    if (!this.state.isStarted) {
+      this.state.players.forEach(p => {
+        p.balance = settings.initialBalance;
+      });
+    }
+    
+    this.notifyStateChange(prevState);
+  }
+
   private canPerformAction(): boolean {
     if (!this.state.isStarted) return false;
     // Game starts when enough players connected
@@ -119,6 +136,7 @@ export class GameEngine {
       if (d1 === d2) {
         player.inJail = false;
         player.jailTurns = 0;
+        this.state.consecutiveDoubles = 0;
         this.addChatMessage('system', 'Система', `${player.name} выбрался из Теневого Бана (дубль!)`);
         this.state.turnStatus = 'MOVING';
         this.notifyStateChange(prevState);
@@ -140,6 +158,23 @@ export class GameEngine {
         }
       }
     } else {
+      if (d1 === d2) {
+        this.state.consecutiveDoubles = (this.state.consecutiveDoubles || 0) + 1;
+        if (this.state.consecutiveDoubles >= 3) {
+          this.state.consecutiveDoubles = 0;
+          player.position = 10;
+          player.inJail = true;
+          player.jailTurns = 0;
+          this.state.turnStatus = 'END_TURN';
+          this.state.currentAction = { type: 'SPECIAL', cellId: 30, message: 'Три дубля подряд! Вы отправлены в Теневой Бан.' };
+          this.addChatMessage('system', 'Система', `${player.name} отправлен в Теневой Бан за три дубля!`);
+          this.notifyStateChange(prevState);
+          return;
+        }
+        this.addChatMessage('system', 'Система', `${player.name} выбросил дубль! (+1 ход)`);
+      } else {
+        this.state.consecutiveDoubles = 0;
+      }
       this.state.turnStatus = 'MOVING';
       this.notifyStateChange(prevState);
       this.movePlayer(d1 + d2);
@@ -170,7 +205,7 @@ export class GameEngine {
         clearInterval(moveInterval);
         this.handleLanding(playerIndex);
       }
-    }, 200);
+    }, 160);
   }
 
   private handleChance(playerIndex: number): void {
@@ -252,6 +287,16 @@ export class GameEngine {
       } else if (cell.ownerId !== player.id) {
         // Must pay rent
         let rentAmount = cell.rent || 0;
+        
+        // Monopoly Rule: Double rent if owner has all properties of this color
+        const colorSet = this.state.cells.filter(c => c.type === CellType.ASSET && c.color === cell.color);
+        const ownsAll = colorSet.every(c => c.ownerId === cell.ownerId);
+        const hasUpgrades = colorSet.some(c => (c.upgradeLevel || 0) > 0);
+
+        if (ownsAll && !hasUpgrades) {
+          rentAmount *= 2;
+        }
+
         if (cell.upgradeLevel === 1) rentAmount *= 3;
         if (cell.upgradeLevel === 2) rentAmount *= 8;
 
@@ -330,6 +375,15 @@ export class GameEngine {
     const upgradeLevel = cell.upgradeLevel || 0;
     if (upgradeLevel >= 2) return; // Max reached
 
+    // Monopoly Rule: Must own all properties of the color set to upgrade
+    const colorSet = this.state.cells.filter(c => c.type === CellType.ASSET && c.color === cell.color);
+    const ownsAll = colorSet.every(c => c.ownerId === player.id);
+    
+    if (!ownsAll) {
+      this.addChatMessage('system', 'Ошибка', `Вы должны владеть всеми активами цвета ${cell.color}, чтобы прокачивать их.`);
+      return;
+    }
+
     const upgradePrice = Math.floor((cell.price || 100) * 0.8);
     if (player.balance >= upgradePrice) {
       this.setBalance(player, player.balance - upgradePrice);
@@ -402,17 +456,31 @@ export class GameEngine {
     if ((this.state.turnStatus as string) === 'GAME_OVER') return;
 
     const prevState = JSON.parse(JSON.stringify(this.state));
-    const currentIndex = this.state.players.findIndex(p => p.id === this.state.currentPlayerId);
-    
-    // Find next non-bankrupt player
-    let nextIndex = (currentIndex + 1) % this.state.players.length;
-    for (let i = 0; i < this.state.players.length; i++) {
-        if (!this.state.players[nextIndex].isBankrupt) break;
-        nextIndex = (nextIndex + 1) % this.state.players.length;
+
+    // Monopoly Rule: If double was rolled, player keeps their turn
+    const d1 = this.state.lastRoll?.[0];
+    const d2 = this.state.lastRoll?.[1];
+    const isDouble = d1 !== undefined && d2 !== undefined && d1 === d2;
+    const player = this.state.players.find(p => p.id === this.state.currentPlayerId);
+
+    if (isDouble && player && !player.inJail && !player.isBankrupt) {
+      this.state.turnStatus = 'WAITING_ROLL';
+      // keep currentPlayerId
+    } else {
+      this.state.consecutiveDoubles = 0;
+      const currentIndex = this.state.players.findIndex(p => p.id === this.state.currentPlayerId);
+      
+      // Find next non-bankrupt player
+      let nextIndex = (currentIndex + 1) % this.state.players.length;
+      for (let i = 0; i < this.state.players.length; i++) {
+          if (!this.state.players[nextIndex].isBankrupt) break;
+          nextIndex = (nextIndex + 1) % this.state.players.length;
+      }
+      
+      this.state.currentPlayerId = this.state.players[nextIndex].id;
+      this.state.turnStatus = 'WAITING_ROLL';
     }
     
-    this.state.currentPlayerId = this.state.players[nextIndex].id;
-    this.state.turnStatus = 'WAITING_ROLL';
     this.state.lastRoll = null;
     this.state.currentAction = undefined;
     this.notifyStateChange(prevState);
