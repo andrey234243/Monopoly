@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { BOARD_CELLS } from '@/lib/board-data';
 import { GameEngine } from '@/lib/game-engine';
@@ -8,25 +8,32 @@ import { NetworkManager } from '@/lib/network-manager';
 import { GameState, Player } from '@/types/game';
 
 // Custom Hook to manage dice animation
-function useFastDiceRoller(lastRoll: [number, number] | null | undefined) {
-  const [displayRoll, setDisplayRoll] = useState<[number, number]>([1, 1]);
+function useFastDiceRoller(lastRoll: [number, number] | null | undefined, turnStatus?: string, onComplete?: () => void) {
+  const [animatedRoll, setAnimatedRoll] = useState<[number, number]>([1, 1]);
+
+  const latestOnComplete = useRef(onComplete);
+  useEffect(() => {
+     latestOnComplete.current = onComplete;
+  }, [onComplete]);
 
   useEffect(() => {
-    if (!lastRoll) return;
+    if (!lastRoll || turnStatus !== 'ROLLING') return;
+
     let iterations = 0;
     const maxIterations = 10;
     const interval = setInterval(() => {
-      setDisplayRoll([Math.floor(Math.random() * 6) + 1, Math.floor(Math.random() * 6) + 1]);
+      setAnimatedRoll([Math.floor(Math.random() * 6) + 1, Math.floor(Math.random() * 6) + 1]);
       iterations++;
       if (iterations >= maxIterations) {
         clearInterval(interval);
-        setDisplayRoll(lastRoll);
+        if (latestOnComplete.current) latestOnComplete.current();
       }
     }, 50);
 
     return () => clearInterval(interval);
-  }, [lastRoll]);
+  }, [lastRoll, turnStatus]);
 
+  const displayRoll = turnStatus === 'ROLLING' ? animatedRoll : (lastRoll || [1, 1]);
   return { displayRoll };
 }
 
@@ -60,14 +67,42 @@ export default function GamePage() {
   const [isRoomSettingsOpen, setIsRoomSettingsOpen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState('');
+  const [isCloudRestoreOpen, setIsCloudRestoreOpen] = useState(false);
+  const [cloudRestoreId, setCloudRestoreId] = useState('');
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [userProfile, setUserProfile] = useState<{ gamesPlayed: number, wins: number, totalWealthPeak: number, totalRentsCollected: number } | null>(null);
+  const [hasSavedProfileStats, setHasSavedProfileStats] = useState(false);
+  const [tradeSetup, setTradeSetup] = useState<{ cellId: number } | null>(null);
+  const [tradePrice, setTradePrice] = useState<string>('150');
+  const [tradeTarget, setTradeTarget] = useState<string>('');
 
   const chatScrollRef = useRef<HTMLDivElement>(null);
+
+  const isSoundEnabledRef = useRef(isSoundEnabled);
+
+  useEffect(() => {
+    isSoundEnabledRef.current = isSoundEnabled;
+  }, [isSoundEnabled]);
+
+  const prevChatMessagesLength = useRef(0);
 
   useEffect(() => {
     if (chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
-  }, [gameState?.chatMessages]);
+    const currentLength = gameState?.chatMessages?.length || 0;
+    if (currentLength > prevChatMessagesLength.current) {
+      const lastMsg = gameState!.chatMessages[currentLength - 1];
+      if (lastMsg.senderId !== localPlayerId && isSoundEnabledRef.current) {
+         try {
+             const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3');
+             audio.volume = 0.4;
+             audio.play().catch(e => console.log('Audio play failed', e));
+         } catch(e){}
+      }
+    }
+    prevChatMessagesLength.current = currentLength;
+  }, [gameState?.chatMessages, localPlayerId]);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && (window as any).Telegram?.WebApp) {
@@ -228,13 +263,6 @@ export default function GamePage() {
            const engine = engineRef.current;
            const isHost = engine?.getState().players.find(p => p.id === localPlayerId)?.isHost;
            
-           // Play sound if enabled and it's not our own message
-           if (isSoundEnabled && msg.senderId !== localPlayerId) {
-             const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3');
-             audio.volume = 0.4;
-             audio.play().catch(e => console.log('Audio play failed', e));
-           }
-
            engine?.addChatMessage('player', msg.payload.senderName, msg.payload.text, msg.payload.senderId, msg.payload.id);
            if (isHost && msg.senderId !== localPlayerId) {
              // Host relays to other clients, excluding original sender
@@ -293,7 +321,7 @@ export default function GamePage() {
     };
   }, [localPlayerId]); // Only restart if ID changes (which shouldn't happen)
 
-    const onEngineStateChange = (state: GameState, previousState?: GameState) => {
+    const onEngineStateChange = async (state: GameState, previousState?: GameState) => {
       setGameState(state);
       
       const wasLocalTurn = previousState?.currentPlayerId === localPlayerId;
@@ -304,7 +332,131 @@ export default function GamePage() {
       if (isLocalTurn || wasLocalTurn || isHost) {
         netRef.current?.broadcast('GAME_STATE', state, localPlayerId);
       }
+      
+      // FIREBASE CLOUD SAVE (Host Only)
+      if (isHost && isJoined) {
+          try {
+             const { doc, setDoc } = await import('firebase/firestore');
+             const { db, auth } = await import('@/lib/firebase');
+             if (auth.currentUser) {
+                 await setDoc(doc(db, 'rooms', peerId || roomId), {
+                    id: peerId || roomId,
+                    name: state.roomName || 'Room',
+                    hostId: auth.currentUser.uid,
+                    gameState: JSON.stringify(state),
+                    createdAt: state.isStarted ? +(new Date()) : +(new Date()),
+                    updatedAt: +(new Date())
+                 }, { merge: true });
+             }
+          } catch (e) {
+             console.error("Cloud save failed", e);
+          }
+      }
     };
+
+    // BOT LOGIC (Host solely responsible for bots)
+    useEffect(() => {
+       if (!gameState || !gameState.isStarted || !isJoined || !engineRef.current) return;
+       const isHost = gameState.players.find(p => p.id === localPlayerId)?.isHost;
+       if (!isHost) return;
+
+       const tStatus = gameState.turnStatus;
+       const engine = engineRef.current;
+       
+       if (tStatus === 'AUCTION') {
+          const auc = gameState.activeAuction;
+          if (!auc) return;
+          const bidderId = auc.bidders[auc.turnIndex];
+          const bidder = gameState.players.find(p => p.id === bidderId);
+          if (bidder?.isBot) {
+             setTimeout(() => {
+                const cell = gameState.cells[auc.cellId];
+                if (bidder.balance > auc.currentBid + 50 && (auc.currentBid < (cell.price || 0) * (bidder.botStrategy === 'AGGRESSIVE' ? 1.5 : 0.8))) {
+                   engine.auctionBid(bidder.id, auc.currentBid + 10);
+                } else {
+                   engine.auctionPass(bidder.id);
+                }
+             }, 1000);
+          }
+          return;
+       }
+
+       const player = gameState.players.find(p => p.id === gameState.currentPlayerId);
+       if (player?.isBot) {
+          if (tStatus === 'WAITING_ROLL') {
+             setTimeout(() => engine.rollDice(), 1500);
+          } else if (tStatus === 'ACTION_REQUIRED' && gameState.currentAction?.type === 'BUY') {
+             setTimeout(() => {
+                const cell = gameState.cells[gameState.currentAction!.cellId!];
+                if (player.balance >= (cell.price || 0) + (player.botStrategy === 'ECONOMICAL' ? 300 : 50)) {
+                   engine.buyAsset();
+                } else {
+                   engine.skipBuy();
+                }
+             }, 1500);
+          } else if (tStatus === 'END_TURN') {
+             setTimeout(() => {
+                if (player.balance < 0) {
+                   engine.surrender(player.id);
+                   return;
+                }
+                // Try upgrades
+                if (player.botStrategy === 'AGGRESSIVE') {
+                   const upgradable = gameState.cells.filter(c => c.ownerId === player.id && (c.upgradeLevel || 0) < 2);
+                   if (upgradable.length > 0 && player.balance > 300) {
+                      engine.upgradeAsset(upgradable[0].id);
+                   }
+                }
+                engine.nextTurn();
+             }, 1000);
+          }
+       }
+    }, [gameState?.turnStatus, gameState?.currentPlayerId, gameState?.activeAuction?.turnIndex]);
+
+    // Save profile stats on game over
+    useEffect(() => {
+       if (gameState?.turnStatus === 'GAME_OVER' && gameState.isStarted && !hasSavedProfileStats) {
+          const saveStats = async () => {
+             setHasSavedProfileStats(true);
+             try {
+                const { doc, getDoc, setDoc } = await import('firebase/firestore');
+                const { db, auth } = await import('@/lib/firebase');
+                if (!auth.currentUser) return;
+                
+                const userRef = doc(db, 'users', auth.currentUser.uid);
+                const userSnap = await getDoc(userRef);
+                
+                let currentProfile: any = { gamesPlayed: 0, wins: 0, totalWealthPeak: 0, totalRentsCollected: 0 };
+                if (userSnap.exists()) {
+                   currentProfile = userSnap.data();
+                }
+                
+                const p = gameState.players.find(p => p.id === localPlayerId);
+                const isWinner = gameState.winnerId === localPlayerId;
+                
+                let myWealth = 0;
+                if (p) {
+                   myWealth = p.balance + gameState.cells.filter(c => c.ownerId === p.id).reduce((sum, c) => sum + (c.price || 0), 0);
+                }
+                
+                const myCollectedRent = gameState.cells.filter(c => c.ownerId === localPlayerId).reduce((sum, c) => sum + (gameState.stats?.cellRents[c.id] || 0), 0);
+
+                await setDoc(userRef, {
+                   id: auth.currentUser.uid,
+                   gamesPlayed: currentProfile.gamesPlayed + 1,
+                   wins: currentProfile.wins + (isWinner ? 1 : 0),
+                   totalWealthPeak: Math.max(currentProfile.totalWealthPeak || 0, myWealth),
+                   totalRentsCollected: (currentProfile.totalRentsCollected || 0) + myCollectedRent,
+                   createdAt: currentProfile.createdAt || +(new Date()),
+                   updatedAt: +(new Date())
+                }, { merge: true });
+             } catch (e) {
+                console.error("Failed to save profile stats", e);
+             }
+          };
+          saveStats();
+       }
+    }, [gameState?.turnStatus, gameState?.isStarted, hasSavedProfileStats, localPlayerId]);
 
     const startAsHost = () => {
       const p: Player = { 
@@ -348,6 +500,72 @@ export default function GamePage() {
       setIsSurrenderModalOpen(false);
     };
     
+    // Fetch profile
+    useEffect(() => {
+       if (isProfileOpen) {
+          const fetchProfile = async () => {
+             try {
+                const { doc, getDoc } = await import('firebase/firestore');
+                const { db, auth } = await import('@/lib/firebase');
+                if (!auth.currentUser) return;
+                
+                const userRef = doc(db, 'users', auth.currentUser.uid);
+                const userSnap = await getDoc(userRef);
+                if (userSnap.exists()) {
+                   setUserProfile(userSnap.data() as any);
+                } else {
+                   setUserProfile({ gamesPlayed: 0, wins: 0, totalWealthPeak: 0, totalRentsCollected: 0 });
+                }
+             } catch (e) {
+                console.error("Failed to load profile", e);
+             }
+          };
+          fetchProfile();
+       }
+    }, [isProfileOpen]);
+
+    const handleCloudRestore = async () => {
+       if (!cloudRestoreId.trim()) return;
+       try {
+           const { doc, getDoc } = await import('firebase/firestore');
+           const { db } = await import('@/lib/firebase');
+           const snap = await getDoc(doc(db, 'rooms', cloudRestoreId.trim()));
+           if (snap.exists()) {
+              const data = snap.data();
+              if (data.gameState) {
+                 const parsedState = JSON.parse(data.gameState);
+                 
+                 // Restore it locally
+                 const p: Player = parsedState.players.find((p: Player) => p.isHost) || { 
+                   id: localPlayerId, 
+                   name: localPlayerName, 
+                   position: 0, 
+                   balance: roomSettings.initialBalance, 
+                   color: localColor, 
+                   avatarUrl: localAvatar,
+                   isHost: true 
+                 };
+                 // We will act as Host
+                 // Notice that players might have different IDs. For now, Host gets the game.
+                 const engine = new GameEngine(parsedState.players, onEngineStateChange);
+                 engineRef.current = engine;
+                 // Set state manually to the engine
+                 // Oh wait, GameEngine has updateState method
+                 engine.updateState(parsedState);
+                 setGameState(parsedState);
+                 setIsJoined(true);
+                 setIsCloudRestoreOpen(false);
+                 alert("Игра успешно восстановлена! Поделитесь новым кодом комнаты или используйте старый для возвращения.");
+              }
+           } else {
+              alert("Сохранение не найдено");
+           }
+       } catch (e) {
+           console.error("Restore failed", e);
+           alert("Ошибка при загрузке облачного сохранения");
+       }
+    };
+
     const handleSendMessage = () => {
       if (!chatInput.trim() || !engineRef.current) return;
       const player = engineRef.current.getState().players.find(p => p.id === localPlayerId);
@@ -434,20 +652,25 @@ export default function GamePage() {
     localStorage.setItem('tycoon_avatar', localAvatar);
     setIsSettingsOpen(false);
     
-    if (gameState && !gameState.isStarted) {
-        const s = {...gameState};
-        const p = s.players.find(pl => pl.id === localPlayerId);
-        if (p) {
-            p.name = localPlayerName;
-            p.color = localColor;
-            p.avatarUrl = localAvatar;
-            setGameState(s);
-            netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
-        }
+    if (gameState && !gameState.isStarted && engineRef.current) {
+        engineRef.current.updatePlayerProfile(localPlayerId, {
+            name: localPlayerName,
+            color: localColor,
+            avatarUrl: localAvatar
+        });
     }
   };
 
-  const { displayRoll } = useFastDiceRoller(gameState?.lastRoll);
+  const handleDiceAnimationComplete = useCallback(() => {
+    if (!gameState || !engineRef.current || gameState.turnStatus !== 'ROLLING') return;
+    const currentPlayer = gameState.players.find(p => p.id === gameState.currentPlayerId);
+    const isHost = gameState.players.find(p => p.id === localPlayerId)?.isHost;
+    if (gameState.currentPlayerId === localPlayerId || (isHost && currentPlayer?.isBot)) {
+        engineRef.current.completeRoll();
+    }
+  }, [gameState, localPlayerId]);
+
+  const { displayRoll } = useFastDiceRoller(gameState?.lastRoll, gameState?.turnStatus, handleDiceAnimationComplete);
 
   if (isSettingsOpen) {
     return (
@@ -543,6 +766,111 @@ export default function GamePage() {
     );
   }
 
+  if (isCloudRestoreOpen) {
+    return (
+      <main className="fixed inset-0 flex flex-col items-center justify-center bg-[#1C1C1D] z-50 p-6 text-white text-center">
+        <div className="w-full max-w-sm space-y-8 bg-[#2C2C2E] p-6 rounded-3xl border border-white/5">
+          <h2 className="text-xl font-bold text-[#3390EC]">Восстановить игру</h2>
+          <p className="text-sm text-gray-400">Введите ID комнаты, чтобы продолжить с последнего облачного сохранения.</p>
+          
+          <div className="space-y-4">
+             <input 
+               type="text"
+               value={cloudRestoreId}
+               onChange={(e) => setCloudRestoreId(e.target.value)}
+               className="w-full bg-[#1C1C1D] rounded-xl p-4 text-center text-white outline-none focus:ring-2 focus:ring-[#3390EC] transition-all font-mono"
+               placeholder="ID Комнаты"
+             />
+          </div>
+
+          <div className="pt-4 flex flex-col gap-3">
+            <button 
+              onClick={handleCloudRestore}
+              className="w-full bg-[#3390EC] text-white p-4 rounded-xl font-bold hover:brightness-110 active:scale-95 transition-all"
+            >
+              Загрузить
+            </button>
+            <button 
+              onClick={() => setIsCloudRestoreOpen(false)}
+              className="w-full text-gray-400 p-4 font-bold hover:text-white"
+            >
+              Отмена
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  if (isProfileOpen) {
+    return (
+      <main className="fixed inset-0 flex flex-col items-center justify-center bg-[#1C1C1D] z-50 p-6 text-white text-center">
+        <div className="w-full max-w-sm space-y-8 bg-[#2C2C2E] p-6 rounded-3xl border border-white/5">
+          <div className="flex justify-between items-center">
+            <h2 className="text-xl font-bold text-[#3390EC] uppercase tracking-widest">Профиль</h2>
+            <button onClick={() => setIsProfileOpen(false)} className="text-gray-400 hover:text-white transition-colors">
+              ✕
+            </button>
+          </div>
+          
+          <div className="flex flex-col items-center gap-4">
+             <div className="w-20 h-20 rounded-full flex items-center justify-center font-bold text-3xl overflow-hidden shadow-lg" style={{ backgroundColor: localColor }}>
+               {localAvatar ? (
+                  <img src={localAvatar} alt="Avatar" className="w-full h-full object-cover" />
+               ) : (
+                  localPlayerName.charAt(0).toUpperCase()
+               )}
+             </div>
+             <div>
+                <h3 className="text-2xl font-black">{localPlayerName}</h3>
+                <p className="text-xs text-gray-500 font-mono tracking-widest uppercase">ID: {localPlayerId.slice(0, 8)}</p>
+             </div>
+          </div>
+          
+          <div className="bg-[#1C1C1D] rounded-2xl p-4 space-y-4 text-left">
+            {!userProfile ? (
+              <div className="flex justify-center p-4">
+                 <div className="w-8 h-8 border-4 border-[#3390EC] border-t-transparent rounded-full animate-spin" />
+              </div>
+            ) : (
+              <>
+                 <div className="flex justify-between items-center border-b border-white/5 pb-2">
+                    <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">Всего игр</span>
+                    <span className="text-lg font-black text-white">{userProfile.gamesPlayed || 0}</span>
+                 </div>
+                 <div className="flex justify-between items-center border-b border-white/5 pb-2">
+                    <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">Побед</span>
+                    <span className="text-lg font-black text-yellow-500">{userProfile.wins || 0}</span>
+                 </div>
+                 <div className="flex justify-between items-center border-b border-white/5 pb-2">
+                    <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">Пик капитала</span>
+                    <span className="text-lg font-black text-[#34C759]">${(userProfile.totalWealthPeak || 0).toLocaleString()}</span>
+                 </div>
+                 <div className="flex justify-between items-center">
+                    <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">Собрано аренды</span>
+                    <span className="text-lg font-black text-[#5E5CE6]">${(userProfile.totalRentsCollected || 0).toLocaleString()}</span>
+                 </div>
+                 
+                 {(userProfile.gamesPlayed || 0) > 0 && (
+                   <div className="pt-2 text-center">
+                     <span className="text-xs text-gray-500 font-bold">Винрейт: {Math.round(((userProfile.wins || 0) / userProfile.gamesPlayed) * 100)}%</span>
+                   </div>
+                 )}
+              </>
+            )}
+          </div>
+
+          <button 
+            onClick={() => setIsProfileOpen(false)}
+            className="w-full bg-[#3390EC] text-white p-4 rounded-xl font-bold hover:brightness-110 active:scale-95 transition-all uppercase tracking-widest"
+          >
+            Закрыть
+          </button>
+        </div>
+      </main>
+    );
+  }
+
   // --- HTML DOM BOARD CALCULATION ---
   const cellsToDraw = gameState ? gameState.cells : BOARD_CELLS;
   const isLocalTurn = gameState?.currentPlayerId === localPlayerId;
@@ -564,18 +892,27 @@ export default function GamePage() {
                 <p className="text-sm text-gray-400">Telegram Edition</p>
               </div>
               
-              <div className="bg-[#2C2C2E] rounded-2xl p-4 flex items-center justify-between" onClick={() => setIsSettingsOpen(true)}>
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg overflow-hidden" style={{ backgroundColor: localColor }}>
-                    {localAvatar ? (
-                       <img src={localAvatar} alt="Avatar" className="w-full h-full object-cover" />
-                    ) : (
-                       localPlayerName.charAt(0).toUpperCase()
-                    )}
+              <div className="flex gap-2">
+                <div className="flex-1 bg-[#2C2C2E] rounded-2xl p-4 flex items-center justify-between cursor-pointer" onClick={() => setIsSettingsOpen(true)}>
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg overflow-hidden shrink-0" style={{ backgroundColor: localColor }}>
+                      {localAvatar ? (
+                         <img src={localAvatar} alt="Avatar" className="w-full h-full object-cover" />
+                      ) : (
+                         localPlayerName.charAt(0).toUpperCase()
+                      )}
+                    </div>
+                    <span className="font-bold truncate">{localPlayerName}</span>
                   </div>
-                  <span className="font-bold">{localPlayerName}</span>
+                  <span className="text-[#3390EC] text-sm shrink-0">Изм.</span>
                 </div>
-                <span className="text-[#3390EC] text-sm">Изм.</span>
+                
+                <button 
+                  onClick={() => setIsProfileOpen(true)}
+                  className="bg-[#2C2C2E] rounded-2xl p-4 flex items-center justify-center text-[#3390EC] hover:bg-[#3390EC]/10 transition-colors"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="22" x2="16" y1="11" y2="11"/></svg>
+                </button>
               </div>
 
               <div className="space-y-6">
@@ -612,6 +949,12 @@ export default function GamePage() {
                     className="w-full bg-[#3390EC] text-white p-4 rounded-xl font-bold hover:brightness-110 active:scale-95 transition-all shadow-[0_4px_20px_rgba(51,144,236,0.3)]"
                   >
                     Создать игру
+                  </button>
+                  <button 
+                    onClick={() => setIsCloudRestoreOpen(true)}
+                    className="w-full bg-transparent border-2 border-[#3390EC]/30 text-[#3390EC] p-3 rounded-xl font-bold hover:bg-[#3390EC]/10 active:scale-95 transition-all"
+                  >
+                    ☁ Восстановить из облака
                   </button>
                   {peerId && <p className="text-xs text-center text-gray-400">ID: <span className="font-mono text-white select-all">{peerId}</span></p>}
                 </div>
@@ -811,12 +1154,33 @@ export default function GamePage() {
                      </div>
 
                      <div className="flex flex-col gap-3">
-                       <button 
-                         onClick={() => setIsRoomSettingsOpen(true)}
-                         className="w-full h-14 bg-[#2C2C2E] text-[#3390EC] rounded-2xl font-black text-xs uppercase tracking-[0.2em] border border-[#3390EC]/20 hover:bg-[#3390EC]/10 transition-all active:scale-95"
-                       >
-                         Настройки
-                       </button>
+                       <div className="flex gap-2">
+                         <button 
+                           onClick={() => {
+                              const botId = 'bot_' + Math.random().toString(36).substring(7);
+                              engineRef.current?.addPlayer({
+                                 id: botId,
+                                 name: 'Бот ' + Math.floor(Math.random()*100),
+                                 position: 0,
+                                 balance: roomSettings.initialBalance,
+                                 color: '#' + Math.floor(Math.random()*16777215).toString(16),
+                                 isHost: false,
+                                 isBot: true,
+                                 botStrategy: Math.random() > 0.5 ? 'AGGRESSIVE' : 'ECONOMICAL'
+                              });
+                           }}
+                           className="flex-1 h-14 bg-[#2C2C2E] text-white rounded-2xl font-black text-xs uppercase tracking-widest border border-white/10 hover:bg-white/5 disabled:opacity-50 transition-all active:scale-95"
+                           disabled={gameState.players.length >= (gameState.maxPlayers || 4)}
+                         >
+                           + Бот
+                         </button>
+                         <button 
+                           onClick={() => setIsRoomSettingsOpen(true)}
+                           className="flex-1 h-14 bg-[#2C2C2E] text-[#3390EC] rounded-2xl font-black text-xs uppercase tracking-[0.2em] border border-[#3390EC]/20 hover:bg-[#3390EC]/10 transition-all active:scale-95"
+                         >
+                           Настройки
+                         </button>
+                       </div>
                        <button 
                          onClick={handleStartGame}
                          disabled={gameState.players.length < 2}
@@ -957,9 +1321,9 @@ export default function GamePage() {
                           {/* Owner Overlay & Indicator */}
                           {owner && (
                             <>
-                              <div className="absolute inset-0 opacity-10 group-hover:opacity-30 transition-opacity pointer-events-none" style={{ backgroundColor: owner.color }} />
+                              <div className={`absolute inset-0 opacity-10 group-hover:opacity-30 transition-opacity pointer-events-none ${cell.isMortgaged ? 'bg-[repeating-linear-gradient(45deg,transparent,transparent_5px,rgba(255,255,255,0.1)_5px,rgba(255,255,255,0.1)_10px)]' : ''}`} style={{ backgroundColor: owner.color }} />
                               <motion.div 
-                                className="absolute top-1 right-1 w-5 h-5 rounded-full z-20 flex items-center justify-center opacity-0 group-hover:opacity-100 scale-0 group-hover:scale-100 transition-all duration-300 shadow-lg text-[8px] font-black text-white overflow-hidden"
+                                className={`absolute top-1 right-1 w-5 h-5 rounded-full z-20 flex items-center justify-center opacity-0 group-hover:opacity-100 scale-0 group-hover:scale-100 transition-all duration-300 shadow-lg text-[8px] font-black text-white overflow-hidden ${cell.isMortgaged ? 'opacity-50 grayscale' : ''}`}
                                 style={{ backgroundColor: owner.color, boxShadow: `0 2px 10px ${owner.color}60` }}
                               >
                                 {owner.avatarUrl ? (
@@ -971,18 +1335,45 @@ export default function GamePage() {
                             </>
                           )}
 
-                          {/* Purchase Flash Effect */}
+                          {cell.isMortgaged && (
+                             <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
+                                <div className="bg-red-500/80 text-white text-[6px] font-black uppercase px-2 py-0.5 -rotate-45 transform">
+                                   Заложен
+                                </div>
+                             </div>
+                          )}
+
+                          {/* Purchase Flash Effect With Particles */}
                           {gameState?.lastPurchase?.cellId === index && (
-                            <motion.div
-                              key={`flash-${gameState.lastPurchase.timestamp}`}
-                              initial={{ opacity: 0, scale: 1 }}
-                              animate={{ 
-                                opacity: [0, 1, 0],
-                                scale: [1, 1.3, 1],
-                              }}
-                              transition={{ duration: 0.6, ease: "easeOut" }}
-                              className="absolute inset-0 bg-white z-30 pointer-events-none rounded-sm"
-                            />
+                             <>
+                               {/* Flash */}
+                               <motion.div
+                                 key={`flash-${gameState.lastPurchase.timestamp}`}
+                                 initial={{ opacity: 0, scale: 1 }}
+                                 animate={{ 
+                                   opacity: [0, 1, 0],
+                                   scale: [1, 1.3, 1],
+                                 }}
+                                 transition={{ duration: 0.6, ease: "easeOut" }}
+                                 className="absolute inset-0 bg-white z-30 pointer-events-none rounded-sm"
+                               />
+                               {/* Particles */}
+                               {[...Array(8)].map((_, pi) => (
+                                 <motion.div
+                                   key={`particle-${gameState.lastPurchase!.timestamp}-${pi}`}
+                                   initial={{ opacity: 1, scale: 0, x: "-50%", y: "-50%", left: "50%", top: "50%" }}
+                                   animate={{ 
+                                     opacity: 0, 
+                                     scale: Math.random() * 1.5 + 0.5,
+                                     x: `calc(-50% + ${Math.cos(pi * (Math.PI/4)) * 60}px)`,
+                                     y: `calc(-50% + ${Math.sin(pi * (Math.PI/4)) * 60}px)`
+                                   }}
+                                   transition={{ duration: 0.7, ease: "easeOut" }}
+                                   className="absolute w-2 h-2 rounded-full z-40 pointer-events-none"
+                                   style={{ backgroundColor: owner?.color || '#FFD700', boxShadow: `0 0 10px ${owner?.color || '#FFD700'}` }}
+                                 />
+                               ))}
+                             </>
                           )}
 
                           {/* Content Container based on orientation */}
@@ -1035,7 +1426,7 @@ export default function GamePage() {
                                   layout: { type: "spring", stiffness: 400, damping: 25 },
                                   y: { duration: 0.2, ease: "easeOut" }
                                 }}
-                                className="w-4 h-4 sm:w-5 sm:h-5 rounded-full ring-2 ring-[#1C1C1D] shadow-[0_0_20px_rgba(0,0,0,0.6)] overflow-hidden flex items-center justify-center z-30"
+                                className="w-3 h-3 sm:w-4 sm:h-4 md:w-5 md:h-5 rounded-full ring-1 ring-[#1C1C1D] shadow-[0_0_10px_rgba(0,0,0,0.6)] overflow-hidden flex items-center justify-center z-30"
                                 style={{ backgroundColor: p.color, boxShadow: `0 0 10px ${p.color}80` }}
                               >
                                 {p.avatarUrl ? (
@@ -1073,22 +1464,50 @@ export default function GamePage() {
                  </motion.div>
                )}
 
-               {gameState.turnStatus === 'MOVING' && isLocalTurn && (
+               {(gameState.turnStatus === 'MOVING' || gameState.turnStatus === 'ROLLING') && isLocalTurn && (
                  <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.8, opacity: 0 }} key="moving" className="w-full h-full flex items-center justify-center pb-6">
                    <div className="flex flex-col items-center gap-2">
-                      <p className="text-[10px] text-gray-500 font-black uppercase tracking-widest animate-pulse">Передвижение...</p>
+                      <p className="text-[10px] text-gray-500 font-black uppercase tracking-widest animate-pulse">
+                        {gameState.turnStatus === 'ROLLING' ? 'Бросок кубиков...' : 'Передвижение...'}
+                      </p>
                    </div>
                  </motion.div>
                )}
 
                {gameState.turnStatus === 'END_TURN' && isLocalTurn && (!gameState.currentAction || gameState.currentAction.type === 'BUY') && (
-                 <motion.div initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }} key="end" className="w-full h-full flex items-center justify-center pb-6">
+                 <motion.div initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }} key="end" className="w-full h-full flex flex-col items-center justify-center pb-6 gap-2">
                     <button 
                       onClick={handleNext}
-                      className="w-full max-w-sm h-16 bg-[#2C2C2E] text-[#3390EC] rounded-[20px] font-black text-xl tracking-wide border-2 border-[#3390EC]/30 active:scale-95 transition-transform"
+                      className={`w-full max-w-sm h-16 rounded-[20px] font-black text-xl tracking-wide border-2 active:scale-95 transition-transform ${(() => {
+                         const player = gameState.players.find(p => p.id === localPlayerId);
+                         return player && player.balance < 0 ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed' : 'bg-[#2C2C2E] text-[#3390EC] border-[#3390EC]/30';
+                      })()}`}
                     >
                       ЗАВЕРШИТЬ ХОД
                     </button>
+                    {(() => {
+                       const player = gameState.players.find(p => p.id === localPlayerId);
+                       if (player && player.balance < 0) {
+                          return (
+                             <button
+                                onClick={() => {
+                                   if (confirm('Вы уверены, что хотите объявить банкротство? Вы выйдете из игры, а ваши активы сгорят.')) {
+                                      engineRef.current?.declareBankrupt();
+                                      if (engineRef.current) {
+                                         const s = engineRef.current.getState();
+                                         setGameState(s);
+                                         netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
+                                      }
+                                   }
+                                }}
+                                className="w-full max-w-sm h-12 bg-red-500/10 text-red-500 rounded-xl font-bold uppercase active:scale-[0.98] transition-transform border-2 border-red-500/30"
+                             >
+                                Объявить банкротство
+                             </button>
+                          );
+                       }
+                       return null;
+                    })()}
                  </motion.div>
                )}
             </AnimatePresence>
@@ -1110,6 +1529,105 @@ export default function GamePage() {
             </div>
           )}
       </div>
+
+      {/* AUCTION OVERLAY */}
+      <AnimatePresence>
+        {gameState?.turnStatus === 'AUCTION' && gameState.activeAuction && (
+          <motion.div 
+            initial={{ y: "100%" }}
+            animate={{ y: 0 }}
+            exit={{ y: "100%" }}
+            transition={{ type: "spring", stiffness: 300, damping: 30 }}
+            className="fixed inset-x-0 bottom-0 bg-[#2C2C2E] rounded-t-3xl pt-2 pb-8 px-6 shadow-[0_-10px_40px_rgba(0,0,0,0.5)] z-40"
+          >
+            <div className="w-12 h-1.5 bg-gray-600 rounded-full mx-auto mb-6" />
+            
+            <div className="text-center mb-6">
+              <h3 className="text-2xl font-black text-white uppercase tracking-widest mb-1">АУКЦИОН</h3>
+              <p className="text-gray-400 font-medium">Ожесточенные торги за <span className="text-[#3390EC] font-bold">{gameState.cells[gameState.activeAuction.cellId].name}</span></p>
+            </div>
+
+            <div className="bg-[#1C1C1D] rounded-2xl p-6 mb-6 text-center border-2 border-dashed border-[#FF9500]/30 shadow-inner">
+               <span className="text-[#FF9500] font-black text-sm uppercase tracking-widest block mb-2">Текущая ставка</span>
+               <span className="text-5xl font-black text-white">${gameState.activeAuction.currentBid}</span>
+               {gameState.activeAuction.highestBidderId && (
+                  <p className="text-xs text-gray-500 font-bold uppercase tracking-widest mt-3">
+                     Лидер: <span className="text-[#FF9500]">{gameState.players.find(p => p.id === gameState.activeAuction!.highestBidderId)?.name}</span>
+                  </p>
+               )}
+            </div>
+
+            <div className="mb-6 flex gap-2 overflow-x-auto pb-2">
+               {gameState.activeAuction.bidders.map((bidderId, idx) => {
+                  const bidder = gameState.players.find(p => p.id === bidderId);
+                  const isTheirTurn = idx === gameState.activeAuction!.turnIndex;
+                  return (
+                      <div key={bidderId} className={`shrink-0 w-12 h-12 rounded-full overflow-hidden border-2 ${isTheirTurn ? 'border-[#3390EC] shadow-[0_0_15px_#3390EC]' : 'border-gray-700 opacity-50'} transition-all`} style={!isTheirTurn ? { backgroundColor: bidder?.color } : { backgroundColor: bidder?.color }}>
+                          {bidder?.avatarUrl ? (
+                              <img src={bidder.avatarUrl} alt={bidder.name} className="w-full h-full object-cover" />
+                          ) : (
+                              <span className="text-[10px] font-black w-full h-full flex items-center justify-center">{bidder?.name.charAt(0)}</span>
+                          )}
+                      </div>
+                  );
+               })}
+            </div>
+
+            {gameState.activeAuction.bidders[gameState.activeAuction.turnIndex] === localPlayerId ? (
+               <div className="flex flex-col gap-3">
+                  <div className="flex gap-2">
+                     {[10, 50, 100].map(add => (
+                        <button 
+                          key={add}
+                          onClick={() => {
+                             const bidMsg = { type: 'AUCTION_BID', playerId: localPlayerId, bidAmount: gameState.activeAuction!.currentBid + add };
+                             engineRef.current?.auctionBid(localPlayerId, gameState.activeAuction!.currentBid + add);
+                             // Need to handle broadcast directly if engine updates state?
+                             // Wait, engineRef updates local state, we need to broadcast. No, we are using the generic action wrapper later maybe?
+                             // Let's just do it directly here:
+                             if (engineRef.current) {
+                                const s = engineRef.current.getState();
+                                setGameState(s);
+                                netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
+                             }
+                          }}
+                          className="flex-1 bg-[#3390EC]/10 text-[#3390EC] border-2 border-[#3390EC]/30 rounded-xl py-3 font-black text-sm uppercase active:scale-[0.98] transition-transform"
+                        >
+                          +{add}
+                        </button>
+                     ))}
+                  </div>
+                  <div className="flex justify-between gap-3 items-center w-full mt-2">
+                     <button
+                        onClick={() => {
+                           engineRef.current?.auctionPass(localPlayerId);
+                           if (engineRef.current) {
+                                const s = engineRef.current.getState();
+                                setGameState(s);
+                                netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
+                             }
+                        }}
+                        className="h-14 px-6 bg-red-500/10 text-red-500 border-2 border-red-500/30 rounded-xl font-bold uppercase active:scale-[0.98] transition-transform"
+                     >
+                        Пас
+                     </button>
+                     
+                     <div className="flex items-center">
+                        <span className="text-gray-500 text-xs font-bold uppercase">Ваш ход</span>
+                     </div>
+                  </div>
+               </div>
+            ) : (
+               <div className="w-full py-4 text-center border-2 border-dashed border-gray-700 bg-gray-800 rounded-2xl">
+                  <span className="text-gray-400 font-bold uppercase tracking-widest animate-pulse text-sm">
+                     Ожидание хода других...
+                  </span>
+               </div>
+            )}
+            
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* BOTTOM SHEET: BUY ACTION */}
       <AnimatePresence>
@@ -1145,12 +1663,7 @@ export default function GamePage() {
             <div className="flex gap-3">
               <button 
                 onClick={() => {
-                  if (engineRef.current) {
-                    const s = engineRef.current.getState();
-                    s.turnStatus = 'END_TURN';
-                    setGameState({...s});
-                    netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
-                  }
+                  engineRef.current?.skipBuy();
                 }}
                 className="flex-1 max-w-[100px] h-14 bg-transparent border-2 border-gray-600 text-gray-300 rounded-2xl font-bold active:bg-gray-700 transition-colors"
               >
@@ -1185,8 +1698,32 @@ export default function GamePage() {
             animate={{ y: 0 }}
             exit={{ y: "100%" }}
             transition={{ type: "spring", stiffness: 300, damping: 30 }}
-            className="fixed inset-x-0 bottom-0 bg-[#2C2C2E] rounded-t-3xl pt-2 pb-8 px-6 shadow-[0_-10px_40px_rgba(0,0,0,0.5)] z-40"
+            className={`fixed inset-x-0 bottom-0 rounded-t-3xl pt-2 pb-8 px-6 shadow-[0_-10px_40px_rgba(0,0,0,0.5)] z-40 ${gameState.currentAction.type === 'CHANCE' ? 'bg-[#1C1C1D] glitch-container' : 'bg-[#2C2C2E]'}`}
+            style={{ 
+              boxShadow: gameState.currentAction.type === 'CHANCE' ? '0 0 40px rgba(175, 82, 222, 0.5), inset 0 0 20px rgba(175, 82, 222, 0.5)' : undefined 
+            }}
           >
+            {gameState.currentAction.type === 'CHANCE' && (
+              <style dangerouslySetInnerHTML={{__html: `
+                @keyframes glitch {
+                  0% { clip-path: inset(10% 0 80% 0); transform: translate(-2px, 2px); }
+                  20% { clip-path: inset(80% 0 5% 0); transform: translate(2px, -2px); }
+                  40% { clip-path: inset(50% 0 30% 0); transform: translate(-2px, -2px); }
+                  60% { clip-path: inset(15% 0 65% 0); transform: translate(2px, 2px); }
+                  80% { clip-path: inset(70% 0 20% 0); transform: translate(-2px, 2px); }
+                  100% { clip-path: inset(10% 0 80% 0); transform: translate(2px, -2px); }
+                }
+                .glitch-container::before {
+                  content: "";
+                  position: absolute;
+                  inset: 0;
+                  background: rgba(175, 82, 222, 0.1);
+                  mix-blend-mode: color-dodge;
+                  pointer-events: none;
+                  animation: glitch 0.2s cubic-bezier(.25, .46, .45, .94) both infinite;
+                }
+              `}} />
+            )}
             {/* Pill */}
             <div className="w-12 h-1.5 bg-gray-500 rounded-full mx-auto mb-6 opacity-30"></div>
             
@@ -1205,6 +1742,148 @@ export default function GamePage() {
             >
               ПОНЯТНО
             </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* PENDING TRADE OFFER MODAL (for receiver) */}
+      <AnimatePresence>
+         {gameState?.pendingTrade && gameState.pendingTrade.toId === localPlayerId && (
+            <motion.div 
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+            >
+               <motion.div 
+                 initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }}
+                 className="bg-[#2C2C2E] w-full max-w-sm rounded-[32px] p-8 shadow-2xl relative"
+               >
+                  <div className="absolute -top-12 left-1/2 -translate-x-1/2 w-24 h-24 bg-[#34C759] rounded-3xl shadow-[0_0_30px_#34C759] flex items-center justify-center -rotate-12">
+                     <span className="text-4xl text-white font-black">🤝</span>
+                  </div>
+                  <h3 className="text-center font-black text-2xl text-white mt-10 mb-2">ПРЕДЛОЖЕНИЕ</h3>
+                  <p className="text-center text-gray-400 text-sm mb-6">
+                     <span className="text-white font-bold">{gameState.players.find(p => p.id === gameState.pendingTrade!.fromId)?.name}</span> предлагает вам купить <span className="text-[#3390EC] font-bold">{gameState.cells[gameState.pendingTrade.cellId].name}</span>
+                  </p>
+                  
+                  <div className="bg-[#1C1C1D] rounded-2xl p-4 flex flex-col items-center mb-8 border border-gray-700">
+                     <span className="text-gray-500 font-bold uppercase tracking-widest text-[10px] mb-1">Они просят</span>
+                     <span className="font-black text-3xl text-[#34C759]">${gameState.pendingTrade.price}</span>
+                  </div>
+
+                  <div className="flex gap-3">
+                     <button 
+                       onClick={() => {
+                          engineRef.current?.rejectTrade();
+                          if (engineRef.current) {
+                             const s = engineRef.current.getState();
+                             setGameState(s);
+                             netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
+                          }
+                       }}
+                       className="flex-1 h-14 bg-gray-800 text-gray-400 rounded-2xl font-bold uppercase active:scale-95 transition-transform"
+                     >
+                        Отклонить
+                     </button>
+                     <button 
+                       onClick={() => {
+                          const player = gameState.players.find(p => p.id === localPlayerId);
+                          if (player && player.balance >= gameState.pendingTrade!.price) {
+                             engineRef.current?.acceptTrade();
+                             if (engineRef.current) {
+                                const s = engineRef.current.getState();
+                                setGameState(s);
+                                netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
+                             }
+                          } else {
+                             alert("Недостаточно средств!");
+                          }
+                       }}
+                       className="flex-[2] h-14 bg-[#34C759] text-white rounded-2xl font-black uppercase shadow-lg shadow-[#34C759]/20 active:scale-95 transition-transform"
+                     >
+                        Принять
+                     </button>
+                  </div>
+               </motion.div>
+            </motion.div>
+         )}
+      </AnimatePresence>
+
+      {/* TRADE SETUP MODAL */}
+      <AnimatePresence>
+        {tradeSetup && gameState && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-[#2C2C2E] w-full max-w-sm rounded-[32px] p-6 shadow-2xl space-y-6"
+            >
+              <div className="text-center">
+                <h3 className="text-2xl font-black text-white uppercase tracking-widest">Продажа</h3>
+                <p className="text-gray-400 font-medium text-sm mt-1">{gameState.cells[tradeSetup.cellId].name}</p>
+              </div>
+
+              <div className="space-y-4">
+                 <div>
+                    <label className="text-xs text-gray-400 uppercase font-bold tracking-widest pl-2 mb-2 block">Покупатель</label>
+                    <select 
+                       value={tradeTarget}
+                       onChange={(e) => setTradeTarget(e.target.value)}
+                       className="w-full bg-[#1C1C1D] text-white rounded-2xl p-4 font-bold outline-none border-2 border-transparent focus:border-[#3390EC]/30 h-14"
+                    >
+                       <option value="">Выберите игрока...</option>
+                       {gameState.players.filter(p => p.id !== localPlayerId && !p.isBankrupt).map(p => (
+                          <option key={p.id} value={p.id}>{p.name}</option>
+                       ))}
+                    </select>
+                 </div>
+                 <div>
+                    <label className="text-xs text-gray-400 uppercase font-bold tracking-widest pl-2 mb-2 block">Цена ($)</label>
+                    <input 
+                       type="number"
+                       value={tradePrice}
+                       onChange={(e) => setTradePrice(e.target.value)}
+                       className="w-full bg-[#1C1C1D] text-[#34C759] rounded-2xl p-4 font-black text-2xl outline-none border-2 border-transparent focus:border-[#3390EC]/30 h-14 text-center"
+                    />
+                 </div>
+              </div>
+
+              <div className="flex gap-3 pt-4">
+                 <button 
+                   onClick={() => setTradeSetup(null)}
+                   className="flex-1 h-14 bg-gray-800 text-white rounded-2xl font-bold uppercase active:scale-[0.98] transition-transform"
+                 >
+                   Отмена
+                 </button>
+                 <button 
+                   onClick={() => {
+                      if (!tradeTarget) {
+                         alert("Выберите покупателя");
+                         return;
+                      }
+                      const priceNum = parseInt(tradePrice);
+                      if (isNaN(priceNum) || priceNum < 0) return;
+                      
+                      engineRef.current?.proposeTrade(tradeSetup.cellId, tradeTarget, priceNum);
+                      if (engineRef.current) {
+                         const s = engineRef.current.getState();
+                         setGameState(s);
+                         netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
+                      }
+                      setTradeSetup(null);
+                      setZoomedCell(null);
+                   }}
+                   className={`flex-[2] h-14 rounded-2xl font-black uppercase transition-all shadow-lg ${tradeTarget ? 'bg-[#3390EC] text-white shadow-[#3390EC]/20 active:scale-[0.98]' : 'bg-gray-700 text-gray-500 cursor-not-allowed'}`}
+                 >
+                   Предложить
+                 </button>
+              </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -1277,18 +1956,62 @@ export default function GamePage() {
       {/* GAME OVER MODAL */}
       <AnimatePresence>
         {gameState?.turnStatus === 'GAME_OVER' && (
-          <div className="fixed inset-0 z-[70] flex items-center justify-center p-6 bg-[#1C1C1D]/95">
+          <div className="fixed inset-0 z-[70] flex flex-col items-center justify-center p-6 bg-[#1C1C1D]/95 overflow-y-auto">
              <motion.div 
-                initial={{ y: 100, opacity: 0 }}
+                initial={{ y: 50, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
-                className="text-center"
+                className="w-full max-w-sm space-y-6"
              >
-                <div className="w-24 h-24 bg-yellow-500 rounded-full mx-auto mb-6 flex items-center justify-center text-5xl shadow-[0_0_50px_rgba(234,179,8,0.5)]">
-                   🏆
+                <div className="text-center">
+                  <div className="w-20 h-20 bg-yellow-500 rounded-full mx-auto mb-4 flex items-center justify-center text-4xl shadow-[0_0_50px_rgba(234,179,8,0.5)]">
+                     🏆
+                  </div>
+                  <h2 className="text-4xl font-black mb-1 text-white uppercase tracking-tighter">ФИНАЛ</h2>
+                  <p className="text-lg text-[#3390EC] font-bold">Победитель: {gameState.players.find(p => p.id === gameState.winnerId)?.name}</p>
                 </div>
-                <h2 className="text-4xl font-black mb-2 text-white">ФИНАЛ</h2>
-                <p className="text-xl text-[#3390EC] font-bold mb-8">Победитель: {gameState.players.find(p => p.id === gameState.winnerId)?.name}</p>
-                <button onClick={() => window.location.reload()} className="px-10 h-14 bg-[#2C2C2E] border border-gray-700 rounded-2xl font-black text-white">ВЕРНУТЬСЯ В ГЛАВНОЕ МЕНЮ</button>
+                
+                {gameState.stats && (
+                  <div className="bg-[#2C2C2E] p-6 rounded-3xl space-y-6">
+                    <h3 className="text-center text-xs text-gray-400 font-extrabold tracking-[0.3em] uppercase">Статистика матча</h3>
+                    
+                    <div className="space-y-4">
+                      {/* Richest on turn 10 */}
+                      {gameState.stats.richestOnTurn10 && (
+                        <div className="flex items-center justify-between border-b border-white/5 pb-3">
+                          <span className="text-sm font-bold text-gray-300">Победитель (Round 10)</span>
+                          <span className="text-sm font-black text-[#5E5CE6]">{gameState.players.find(p => p.id === gameState.stats!.richestOnTurn10)?.name || gameState.stats.richestOnTurn10}</span>
+                        </div>
+                      )}
+
+                      {/* Best Rented Cell */}
+                      {Object.keys(gameState.stats.cellRents || {}).length > 0 && (
+                        <div className="flex items-center justify-between border-b border-white/5 pb-3">
+                          <span className="text-sm font-bold text-gray-300">Самый доходный актив</span>
+                          <span className="text-sm font-black text-[#34C759]">
+                            {(() => {
+                               const bestCellId = Object.keys(gameState.stats.cellRents).reduce((a, b) => gameState.stats!.cellRents[parseInt(a)] > gameState.stats!.cellRents[parseInt(b)] ? a : b);
+                               return gameState.cells[parseInt(bestCellId)].name;
+                            })()}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Total Transactions */}
+                      <div className="flex items-center justify-between border-b border-white/5 pb-3">
+                        <span className="text-sm font-bold text-gray-300">Всего транзакций</span>
+                        <span className="text-sm font-black text-white">{gameState.stats.totalTransactions}</span>
+                      </div>
+                      
+                      {/* Round reached */}
+                      <div className="flex items-center justify-between border-b border-white/5 pb-3">
+                        <span className="text-sm font-bold text-gray-300">Всего раундов</span>
+                        <span className="text-sm font-black text-white">{gameState.roundNumber}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <button onClick={() => window.location.reload()} className="w-full h-14 bg-[#3390EC] hover:brightness-110 active:scale-95 transition-all shadow-[0_4px_20px_rgba(51,144,236,0.3)] rounded-2xl font-black text-white tracking-widest uppercase">НА ГЛАВНУЮ</button>
              </motion.div>
           </div>
         )}
@@ -1529,48 +2252,89 @@ export default function GamePage() {
               )}
 
               {/* Upgrade Logic */}
-              {cellsToDraw[zoomedCell].type === 'ASSET' && cellsToDraw[zoomedCell].ownerId === localPlayerId && (cellsToDraw[zoomedCell].upgradeLevel || 0) < 2 && (
-                <div className="mb-8 space-y-4">
-                  <div className="flex items-center justify-between p-4 bg-[#1C1C1D] rounded-2xl border-2 border-dashed border-[#3390EC]/30">
-                    <div>
-                      <p className="text-xs text-[#3390EC] font-black uppercase mb-1">Доступна модернизация</p>
-                      <p className="font-bold text-white text-lg">
-                        {(cellsToDraw[zoomedCell].upgradeLevel || 0) === 0 ? 'Подключить Трафик' : 'Премиум-Серверы'}
-                      </p>
-                      <p className="text-xs text-gray-500 mt-1">
-                        Рента увеличится до ${ (cellsToDraw[zoomedCell].upgradeLevel || 0) === 0 ? (cellsToDraw[zoomedCell].rent || 0) * 3 : (cellsToDraw[zoomedCell].rent || 0) * 8 }
-                      </p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-xl font-black text-white">${Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8)}</p>
-                    </div>
-                  </div>
-                    <button 
-                      onClick={() => {
-                        const cost = Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8);
-                        const player = gameState?.players.find(p => p.id === localPlayerId);
-                        if (player && player.balance >= cost) {
-                          handleUpgrade(zoomedCell!);
-                        }
-                      }}
-                      disabled={(() => {
-                        const cost = Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8);
-                        const player = gameState?.players.find(p => p.id === localPlayerId);
-                        return !player || player.balance < cost;
-                      })()}
-                      className={`w-full h-14 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-lg flex flex-col items-center justify-center ${(() => {
-                        const cost = Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8);
-                        const player = gameState?.players.find(p => p.id === localPlayerId);
-                        return player && player.balance >= cost ? 'bg-[#3390EC] text-white shadow-[#3390EC]/20 active:scale-[0.98]' : 'bg-[#FF3B30] text-white shadow-[#FF3B30]/30';
-                      })()}`}
-                    >
-                      <span>ПРОКАЧАТЬ</span>
-                      {(() => {
-                        const cost = Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8);
-                        const player = gameState?.players.find(p => p.id === localPlayerId);
-                        return (!player || player.balance < cost) && <span className="text-[8px] opacity-70 mt-0.5">Недостаточно средств</span>;
-                      })()}
-                    </button>
+              {cellsToDraw[zoomedCell].type === 'ASSET' && cellsToDraw[zoomedCell].ownerId === localPlayerId && (
+                <div className="mb-6 space-y-4">
+                   {/* Sell Upgrade */}
+                   {(cellsToDraw[zoomedCell].upgradeLevel || 0) > 0 && (
+                      <button 
+                        onClick={() => engineRef.current?.sellUpgrade(zoomedCell!)}
+                        className="w-full h-12 rounded-xl font-bold text-xs uppercase bg-[#FF9500]/10 text-[#FF9500] border-2 border-[#FF9500]/30 active:scale-[0.98] transition-transform"
+                      >
+                        Продать улучшение (+${Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8 * 0.5)})
+                      </button>
+                   )}
+
+                   {/* Upgrade Assset */}
+                   {(cellsToDraw[zoomedCell].upgradeLevel || 0) < 2 && !cellsToDraw[zoomedCell].isMortgaged && (
+                   <div className="space-y-4">
+                     <div className="flex items-center justify-between p-4 bg-[#1C1C1D] rounded-2xl border-2 border-dashed border-[#3390EC]/30">
+                       <div>
+                         <p className="text-xs text-[#3390EC] font-black uppercase mb-1">Доступна модернизация</p>
+                         <p className="font-bold text-white text-lg">
+                           {(cellsToDraw[zoomedCell].upgradeLevel || 0) === 0 ? 'Подключить Трафик' : 'Премиум-Серверы'}
+                         </p>
+                         <p className="text-xs text-gray-500 mt-1">
+                           Рента увеличится до ${ (cellsToDraw[zoomedCell].upgradeLevel || 0) === 0 ? (cellsToDraw[zoomedCell].rent || 0) * 3 : (cellsToDraw[zoomedCell].rent || 0) * 8 }
+                         </p>
+                       </div>
+                       <div className="text-right">
+                         <p className="text-xl font-black text-white">${Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8)}</p>
+                       </div>
+                     </div>
+                       <button 
+                         onClick={() => {
+                           const cost = Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8);
+                           const player = gameState?.players.find(p => p.id === localPlayerId);
+                           if (player && player.balance >= cost) {
+                             handleUpgrade(zoomedCell!);
+                           }
+                         }}
+                         className={`w-full h-12 rounded-xl font-bold text-xs uppercase transition-all shadow-lg flex items-center justify-center ${(() => {
+                           const cost = Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8);
+                           const player = gameState?.players.find(p => p.id === localPlayerId);
+                           return player && player.balance >= cost ? 'bg-[#3390EC] text-white' : 'bg-gray-800 text-gray-500 cursor-not-allowed';
+                         })()}`}
+                       >
+                         ПРОКАЧАТЬ
+                       </button>
+                   </div>
+                   )}
+
+                   {/* Mortgage / Unmortgage */}
+                   {(cellsToDraw[zoomedCell].upgradeLevel || 0) === 0 && (
+                     !cellsToDraw[zoomedCell].isMortgaged ? (
+                        <div className="flex gap-2 w-full">
+                           <button 
+                             onClick={() => engineRef.current?.mortgageAsset(zoomedCell!)}
+                             className="flex-1 h-12 rounded-xl font-bold text-xs uppercase bg-[#FF3B30]/10 text-[#FF3B30] border-2 border-[#FF3B30]/30 active:scale-[0.98] transition-transform"
+                           >
+                             Заложить (+${Math.floor((cellsToDraw[zoomedCell].price || 0) * 0.5)})
+                           </button>
+                           <button 
+                             onClick={() => setTradeSetup({ cellId: zoomedCell! })}
+                             className="flex-1 h-12 rounded-xl font-bold text-xs uppercase bg-[#34C759]/10 text-[#34C759] border-2 border-[#34C759]/30 active:scale-[0.98] transition-transform"
+                           >
+                             Предложить
+                           </button>
+                        </div>
+                     ) : (
+                        <div className="space-y-4">
+                           <div className="p-3 bg-red-500/10 border-2 border-dashed border-red-500/30 rounded-xl text-center">
+                              <span className="text-red-500 text-xs font-bold uppercase">Осталось ходов до списания: {cellsToDraw[zoomedCell].mortgageTurnsLeft}</span>
+                           </div>
+                           <button 
+                             onClick={() => engineRef.current?.unmortgageAsset(zoomedCell!)}
+                             className={`w-full h-12 rounded-xl font-bold text-xs uppercase active:scale-[0.98] transition-transform ${(() => {
+                               const cost = Math.floor((cellsToDraw[zoomedCell].price || 0) * 0.6);
+                               const player = gameState?.players.find(p => p.id === localPlayerId);
+                               return player && player.balance >= cost ? 'bg-[#34C759]/20 text-[#34C759] border-2 border-[#34C759]/30' : 'bg-gray-800 text-gray-500 cursor-not-allowed border-2 border-gray-700';
+                             })()}`}
+                           >
+                             Выкупить актив (-${Math.floor((cellsToDraw[zoomedCell].price || 0) * 0.6)})
+                           </button>
+                        </div>
+                     )
+                   )}
                 </div>
               )}
 

@@ -1,0 +1,44 @@
+{
+  "entities": {
+    "Room": {
+      "title": "Room",
+      "description": "A multiplayer game room",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "hostId": { "type": "string" },
+        "gameState": { "type": "string", "description": "Serialized game state" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["id", "name", "hostId", "gameState", "createdAt", "updatedAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Player's statistics across games",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "gamesPlayed": { "type": "number" },
+        "wins": { "type": "number" },
+        "totalWealthPeak": { "type": "number" },
+        "totalRentsCollected": { "type": "number" },
+        "favoriteCellId": { "type": "number" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["id", "gamesPlayed", "wins", "totalWealthPeak", "totalRentsCollected", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/rooms/{roomId}": {
+      "schema": { "$ref": "Room" },
+      "description": "Game rooms active in the system"
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "UserProfile" },
+      "description": "Player profile and game statistics"
+    }
+  }
+}

@@ -16,6 +16,8 @@ export interface Cell {
   ownerId?: string | null;
   description?: string;
   upgradeLevel?: number; // 0: None, 1: Traffic, 2: Premium Servers
+  isMortgaged?: boolean;
+  mortgageTurnsLeft?: number;
 }
 
 export interface Player {
@@ -29,6 +31,8 @@ export interface Player {
   inJail?: boolean;
   jailTurns?: number;
   isBankrupt?: boolean;
+  isBot?: boolean;
+  botStrategy?: 'AGGRESSIVE' | 'ECONOMICAL';
 }
 
 export interface ChatMessage {
@@ -43,6 +47,7 @@ export interface ChatMessage {
 export interface GameState {
   isStarted: boolean;
   version: number;
+  roundNumber?: number;
   roomName?: string;
   roomPassword?: string;
   maxPlayers?: number;
@@ -50,8 +55,15 @@ export interface GameState {
   players: Player[];
   currentPlayerId: string;
   lastRoll: [number, number] | null;
-  turnStatus: 'WAITING_ROLL' | 'MOVING' | 'ACTION_REQUIRED' | 'END_TURN' | 'GAME_OVER';
+  turnStatus: 'WAITING_ROLL' | 'ROLLING' | 'MOVING' | 'ACTION_REQUIRED' | 'AUCTION' | 'END_TURN' | 'GAME_OVER';
   cells: Cell[];
+  activeAuction?: {
+    cellId: number;
+    currentBid: number;
+    highestBidderId: string | null;
+    bidders: string[];
+    turnIndex: number;
+  };
   currentAction?: {
     type: 'BUY' | 'RENT' | 'SPECIAL' | 'CHANCE' | 'TAX';
     cellId: number;
@@ -69,5 +81,24 @@ export interface GameState {
     playerId: string;
     amount: number;
     timestamp: number;
+  };
+  tradeOffer?: {
+    fromPlayerId: string;
+    toPlayerId: string;
+    offerMoney: number;
+    offerCells: number[];
+    requestMoney: number;
+    requestCells: number[];
+  };
+  pendingTrade?: {
+    cellId: number;
+    fromId: string;
+    toId: string;
+    price: number;
+  };
+  stats: {
+    richestOnTurn10: string | null;
+    cellRents: Record<number, number>; // cellId -> total rent paid
+    totalTransactions: number;
   };
 }
