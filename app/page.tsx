@@ -44,6 +44,7 @@ export default function GamePage() {
   const [localColor, setLocalColor] = useState<string>('#3390EC');
   const [recentRooms, setRecentRooms] = useState<{id: string, name: string}[]>([]);
   const [publicRooms, setPublicRooms] = useState<{id: string, name: string, hostName: string, playerCount: number, maxPlayers: number, isStarted: boolean}[]>([]);
+  const [isSoundEnabled, setIsSoundEnabled] = useState(true);
   const [localAvatar, setLocalAvatar] = useState<string>('https://api.dicebear.com/7.x/pixel-art/svg?seed=Felix');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [roomSettings, setRoomSettings] = useState({
@@ -107,6 +108,20 @@ export default function GamePage() {
   }, []);
 
   // Lobby Sync
+  useEffect(() => {
+    const handleUnload = () => {
+      const isHost = engineRef.current?.getState().players.find(p => p.id === localPlayerId)?.isHost;
+      if (isHost && peerId && engineRef.current && !engineRef.current.getState().isStarted) {
+        // We can't await here, but we can try a beacon or a simple fetch
+        navigator.sendBeacon('/api/rooms', JSON.stringify({ id: peerId, _method: 'DELETE' }));
+        // Note: DELETE method is not supported by sendBeacon usually, so we might need to handle it in the API as a POST with a flag or just hope for the best.
+        // For simplicity in this environment, I'll stick to the explicit exitRoom in UI.
+      }
+    };
+    window.addEventListener('beforeunload', handleUnload);
+    return () => window.removeEventListener('beforeunload', handleUnload);
+  }, [peerId, localPlayerId]);
+
   useEffect(() => {
     if (isJoined || typeof window === 'undefined') return;
 
@@ -212,6 +227,14 @@ export default function GamePage() {
         } else if (msg.type === 'CHAT') {
            const engine = engineRef.current;
            const isHost = engine?.getState().players.find(p => p.id === localPlayerId)?.isHost;
+           
+           // Play sound if enabled and it's not our own message
+           if (isSoundEnabled && msg.senderId !== localPlayerId) {
+             const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3');
+             audio.volume = 0.4;
+             audio.play().catch(e => console.log('Audio play failed', e));
+           }
+
            engine?.addChatMessage('player', msg.payload.senderName, msg.payload.text, msg.payload.senderId, msg.payload.id);
            if (isHost && msg.senderId !== localPlayerId) {
              // Host relays to other clients, excluding original sender
@@ -332,6 +355,25 @@ export default function GamePage() {
       setChatInput('');
     };
 
+    const exitRoom = async () => {
+      const isHost = gameState?.players.find(p => p.id === localPlayerId)?.isHost;
+      if (isHost && peerId && !gameState?.isStarted) {
+        try {
+          await fetch('/api/rooms', {
+            method: 'DELETE',
+            body: JSON.stringify({ id: peerId })
+          });
+        } catch (e) {
+          console.error('Failed to cleanup room', e);
+        }
+      }
+      netRef.current?.disconnect();
+      setIsJoined(false);
+      engineRef.current = null;
+      setGameState(null);
+      window.location.reload();
+    };
+
     const joinRoom = (id?: string) => {
       const targetId = id || roomId;
       if (!targetId) return;
@@ -443,6 +485,18 @@ export default function GamePage() {
                    className="w-full bg-[#2C2C2E] p-3 rounded-xl text-xs text-gray-400 outline-none focus:ring-1 focus:ring-[#3390EC]"
                  />
               </div>
+            </div>
+
+            <div className="flex items-center justify-between bg-[#2C2C2E] p-4 rounded-xl border border-white/5 mb-4">
+              <span className="text-sm font-bold text-white">Звук уведомлений</span>
+              <button 
+                onClick={() => setIsSoundEnabled(!isSoundEnabled)}
+                className={`w-12 h-6 rounded-full transition-colors relative ${isSoundEnabled ? 'bg-[#3390EC]' : 'bg-gray-600'}`}
+              >
+                <div 
+                  className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm transition-all ${isSoundEnabled ? 'left-[26px]' : 'left-[4px]'}`}
+                />
+              </button>
             </div>
 
             <div>
@@ -628,7 +682,11 @@ export default function GamePage() {
                   <motion.span
                     key={`bal-${gameState.lastBalanceChange.timestamp}`}
                     initial={{ opacity: 0, y: 0 }}
-                    animate={{ opacity: 1, y: -20 }}
+                    animate={{ 
+                      opacity: [0, 1, 1, 0], 
+                      y: [0, -20, -25, -30] 
+                    }}
+                    transition={{ duration: 3, times: [0, 0.1, 0.8, 1] }}
                     exit={{ opacity: 0 }}
                     className={`absolute right-0 font-bold text-sm ${gameState.lastBalanceChange.amount > 0 ? 'text-[#34C759]' : 'text-[#FF3B30]'}`}
                   >
@@ -653,14 +711,22 @@ export default function GamePage() {
              )}
           </button>
 
-          <div className="flex -space-x-2">
-            {gameState?.players.filter(p => p.id !== localPlayerId).map(p => (
-              <div key={p.id} className="w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs ring-2 ring-[#1C1C1D] overflow-hidden" style={{ backgroundColor: p.color }}>
-                {p.avatarUrl ? (
-                  <img src={p.avatarUrl} alt={p.name} className="w-full h-full object-cover" />
-                ) : (
-                  p.name.charAt(0).toUpperCase()
-                )}
+          <div className="flex items-center gap-2 pr-2">
+            {gameState?.players.map(p => (
+              <div key={p.id} className={`flex items-center gap-1.5 bg-[#2C2C2E]/50 px-2 py-1 rounded-full border ${p.id === gameState.currentPlayerId ? 'border-[#3390EC]' : 'border-white/5'}`}>
+                <div className="w-5 h-5 rounded-full flex items-center justify-center font-bold text-[8px] overflow-hidden" style={{ backgroundColor: p.color }}>
+                  {p.avatarUrl ? (
+                    <img src={p.avatarUrl} alt={p.name} className="w-full h-full object-cover" />
+                  ) : (
+                    p.name.charAt(0).toUpperCase()
+                  )}
+                </div>
+                <div className="flex flex-col -gap-0.5">
+                  <span className={`text-[8px] font-black uppercase tracking-tighter ${p.id === gameState.currentPlayerId ? 'text-[#3390EC]' : 'text-gray-500'}`}>
+                    {p.name.split(' ')[0]}
+                  </span>
+                  <span className="text-[10px] font-black text-white leading-none">${p.balance}</span>
+                </div>
               </div>
             ))}
           </div>
@@ -694,6 +760,18 @@ export default function GamePage() {
         <div className="absolute inset-0 flex flex-col items-center justify-center z-0 p-16 pointer-events-none">
              {gameState ? (
                <div className="w-full h-full max-w-[200px] flex flex-col items-center justify-center gap-2">
+                 <AnimatePresence>
+                   {gameState.lastRoll && (
+                     <motion.div 
+                       initial={{ opacity: 0, scale: 0.5, y: 20 }}
+                       animate={{ opacity: 1, scale: 1, y: 0 }}
+                       className="flex gap-2 mb-2"
+                     >
+                       <div className="w-10 h-10 bg-[#2C2C2E] rounded-xl flex items-center justify-center text-xl font-black text-[#3390EC] shadow-xl border border-white/5">{displayRoll[0]}</div>
+                       <div className="w-10 h-10 bg-[#2C2C2E] rounded-xl flex items-center justify-center text-xl font-black text-[#3390EC] shadow-xl border border-white/5">{displayRoll[1]}</div>
+                     </motion.div>
+                   )}
+                 </AnimatePresence>
                  <h1 className="text-2xl font-black text-[#3390EC] opacity-30 tracking-widest mb-4">МАГНАТ</h1>
                  <div className="flex flex-col items-center gap-2 w-full overflow-hidden">
                    {gameState.chatMessages.slice(-5).map((msg, i) => (
@@ -916,9 +994,8 @@ export default function GamePage() {
 
                {gameState.turnStatus === 'MOVING' && isLocalTurn && (
                  <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.8, opacity: 0 }} key="moving" className="w-full h-full flex items-center justify-center pb-6">
-                   <div className="flex gap-4">
-                     <div className="w-16 h-16 bg-[#2C2C2E] rounded-2xl flex items-center justify-center text-3xl font-black text-[#3390EC] shadow-inner">{displayRoll[0]}</div>
-                     <div className="w-16 h-16 bg-[#2C2C2E] rounded-2xl flex items-center justify-center text-3xl font-black text-[#3390EC] shadow-inner">{displayRoll[1]}</div>
+                   <div className="flex flex-col items-center gap-2">
+                      <p className="text-[10px] text-gray-500 font-black uppercase tracking-widest animate-pulse">Передвижение...</p>
                    </div>
                  </motion.div>
                )}
@@ -1000,9 +1077,19 @@ export default function GamePage() {
               </button>
               <button 
                 onClick={handleBuy}
-                className="flex-1 h-14 bg-[#3390EC] text-white rounded-2xl font-bold text-lg active:scale-[0.98] transition-transform shadow-lg shadow-[#3390EC]/20"
+                className={`flex-1 h-14 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-lg flex flex-col items-center justify-center ${(() => {
+                    const player = gameState.players.find(p => p.id === localPlayerId);
+                    const cell = gameState.cells[player?.position || 0];
+                    return (player?.balance || 0) >= (cell.price || 0);
+                })() ? 'bg-[#3390EC] text-white shadow-[#3390EC]/20 active:scale-[0.98]' : 'bg-[#FF3B30] text-white shadow-[#FF3B30]/30'}`}
               >
-                КУПИТЬ АКТИВ
+                <span>КУПИТЬ АКТИВ</span>
+                {(() => {
+                    const player = gameState.players.find(p => p.id === localPlayerId);
+                    const cell = gameState.cells[player?.position || 0];
+                    const canAfford = (player?.balance || 0) >= (cell.price || 0);
+                    return !canAfford && <span className="text-[8px] opacity-70 mt-0.5">Недостаточно средств</span>;
+                })()}
               </button>
             </div>
           </motion.div>
@@ -1084,13 +1171,7 @@ export default function GamePage() {
                      НАЧАТЬ ИГРУ
                    </button>
                    <button 
-                     onClick={() => {
-                        netRef.current?.disconnect();
-                        setIsJoined(false);
-                        engineRef.current = null;
-                        setGameState(null);
-                        window.location.reload();
-                     }}
+                     onClick={exitRoom}
                      className="w-full h-12 text-gray-500 font-black uppercase text-xs tracking-widest active:text-white"
                    >
                      ← Вернуться на главную
@@ -1102,13 +1183,7 @@ export default function GamePage() {
                 <div className="space-y-4 w-full">
                   <p className="text-gray-500 animate-pulse italic">Дождитесь, пока хост запустит систему...</p>
                   <button 
-                     onClick={() => {
-                        netRef.current?.disconnect();
-                        setIsJoined(false);
-                        engineRef.current = null;
-                        setGameState(null);
-                        window.location.reload();
-                     }}
+                     onClick={exitRoom}
                      className="w-full h-12 text-gray-500 font-black uppercase text-xs tracking-widest active:text-white"
                    >
                      ← К списку игр
@@ -1397,13 +1472,32 @@ export default function GamePage() {
                       <p className="text-xl font-black text-white">${Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8)}</p>
                     </div>
                   </div>
-                  <button 
-                    onClick={() => handleUpgrade(zoomedCell!)}
-                    disabled={(gameState?.players.find(p => p.id === localPlayerId)?.balance || 0) < Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8)}
-                    className="w-full h-14 bg-[#3390EC] text-white rounded-2xl font-black text-lg active:scale-[0.98] transition-transform shadow-lg shadow-[#3390EC]/20 disabled:grayscale disabled:opacity-50"
-                  >
-                    ПРОКАЧАТЬ
-                  </button>
+                    <button 
+                      onClick={() => {
+                        const cost = Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8);
+                        const player = gameState?.players.find(p => p.id === localPlayerId);
+                        if (player && player.balance >= cost) {
+                          handleUpgrade(zoomedCell!);
+                        }
+                      }}
+                      disabled={(() => {
+                        const cost = Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8);
+                        const player = gameState?.players.find(p => p.id === localPlayerId);
+                        return !player || player.balance < cost;
+                      })()}
+                      className={`w-full h-14 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-lg flex flex-col items-center justify-center ${(() => {
+                        const cost = Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8);
+                        const player = gameState?.players.find(p => p.id === localPlayerId);
+                        return player && player.balance >= cost ? 'bg-[#3390EC] text-white shadow-[#3390EC]/20 active:scale-[0.98]' : 'bg-[#FF3B30] text-white shadow-[#FF3B30]/30';
+                      })()}`}
+                    >
+                      <span>ПРОКАЧАТЬ</span>
+                      {(() => {
+                        const cost = Math.floor((cellsToDraw[zoomedCell].price || 100) * 0.8);
+                        const player = gameState?.players.find(p => p.id === localPlayerId);
+                        return (!player || player.balance < cost) && <span className="text-[8px] opacity-70 mt-0.5">Недостаточно средств</span>;
+                      })()}
+                    </button>
                 </div>
               )}
 

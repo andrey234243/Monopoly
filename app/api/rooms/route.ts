@@ -29,7 +29,14 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const room: Omit<RoomInfo, 'lastPing'> = await req.json();
+  const body = await req.json();
+  
+  if (body._method === 'DELETE') {
+    activeRooms = activeRooms.filter(r => r.id !== body.id);
+    return NextResponse.json({ success: true });
+  }
+
+  const room: Omit<RoomInfo, 'lastPing'> = body;
   
   const now = Date.now();
   const existingIdx = activeRooms.findIndex(r => r.id === room.id);
@@ -41,5 +48,11 @@ export async function POST(req: Request) {
   }
   
   cleanup();
+  return NextResponse.json({ success: true });
+}
+
+export async function DELETE(req: Request) {
+  const { id } = await req.json();
+  activeRooms = activeRooms.filter(r => r.id !== id);
   return NextResponse.json({ success: true });
 }
