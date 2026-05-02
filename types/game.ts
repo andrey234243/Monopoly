@@ -42,8 +42,9 @@ export interface ChatMessage {
 
 export interface GameState {
   isStarted: boolean;
+  version: number;
   roomName?: string;
-  roomPassword?: string; // Optional password
+  roomPassword?: string;
   maxPlayers?: number;
   initialBalance?: number;
   players: Player[];

@@ -42,6 +42,8 @@ export default function GamePage() {
   const [localPlayerId, setLocalPlayerId] = useState<string>('');
   const [localPlayerName, setLocalPlayerName] = useState<string>('');
   const [localColor, setLocalColor] = useState<string>('#3390EC');
+  const [recentRooms, setRecentRooms] = useState<{id: string, name: string}[]>([]);
+  const [publicRooms, setPublicRooms] = useState<{id: string, name: string, hostName: string, playerCount: number, maxPlayers: number, isStarted: boolean}[]>([]);
   const [localAvatar, setLocalAvatar] = useState<string>('https://api.dicebear.com/7.x/pixel-art/svg?seed=Felix');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [roomSettings, setRoomSettings] = useState({
@@ -96,10 +98,60 @@ export default function GamePage() {
 
         const savedAvatar = localStorage.getItem('tycoon_avatar');
         setLocalAvatar(savedAvatar || `https://api.dicebear.com/7.x/pixel-art/svg?seed=${localId}`);
+
+        const savedRooms = localStorage.getItem('tycoon_recent_rooms');
+        if (savedRooms) setRecentRooms(JSON.parse(savedRooms));
     };
 
     initProfile();
   }, []);
+
+  // Lobby Sync
+  useEffect(() => {
+    if (isJoined || typeof window === 'undefined') return;
+
+    const fetchRooms = async () => {
+      try {
+        const res = await fetch('/api/rooms');
+        const data = await res.json();
+        setPublicRooms(data);
+      } catch (e) {
+        console.error('Failed to fetch rooms', e);
+      }
+    };
+
+    fetchRooms();
+    const interval = setInterval(fetchRooms, 10000);
+    return () => clearInterval(interval);
+  }, [isJoined]);
+
+  // Host Ping
+  useEffect(() => {
+    const isHost = gameState?.players.find(p => p.id === localPlayerId)?.isHost;
+    if (!isHost || !peerId || !gameState) return;
+
+    const pingRoom = async () => {
+      try {
+        await fetch('/api/rooms', {
+          method: 'POST',
+          body: JSON.stringify({
+            id: peerId,
+            name: gameState.roomName || 'Без названия',
+            hostName: localPlayerName,
+            playerCount: gameState.players.length,
+            maxPlayers: gameState.maxPlayers || 4,
+            isStarted: gameState.isStarted
+          })
+        });
+      } catch (e) {
+        console.error('Failed to ping room', e);
+      }
+    };
+
+    pingRoom();
+    const interval = setInterval(pingRoom, 15000);
+    return () => clearInterval(interval);
+  }, [gameState, peerId, localPlayerId, localPlayerName]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !localPlayerId) return;
@@ -134,12 +186,15 @@ export default function GamePage() {
     const network = new NetworkManager(
       (msg) => {
         if (msg.type === 'GAME_STATE') {
-          engineRef.current?.setStateSilently(msg.payload);
-          setGameState(msg.payload);
-          
-          const isHost = engineRef.current?.getState().players.find(p => p.id === localPlayerId)?.isHost;
-          if (isHost && msg.senderId !== localPlayerId) {
-            netRef.current?.broadcast('GAME_STATE', msg.payload, localPlayerId);
+          const currentVersion = engineRef.current?.getState().version || 0;
+          if (msg.payload.version > currentVersion) {
+            engineRef.current?.setStateSilently(msg.payload);
+            setGameState(msg.payload);
+            
+            const isHost = engineRef.current?.getState().players.find(p => p.id === localPlayerId)?.isHost;
+            if (isHost && msg.senderId !== localPlayerId) {
+              netRef.current?.broadcast('GAME_STATE', msg.payload, localPlayerId, msg.senderId);
+            }
           }
         } else if (msg.type === 'JOIN') {
           const engine = engineRef.current;
@@ -157,10 +212,10 @@ export default function GamePage() {
         } else if (msg.type === 'CHAT') {
            const engine = engineRef.current;
            const isHost = engine?.getState().players.find(p => p.id === localPlayerId)?.isHost;
-           engine?.addChatMessage('player', msg.payload.senderName, msg.payload.text, msg.payload.senderId);
-           if (isHost) {
-             // Host relays to other clients
-             netRef.current?.broadcast('CHAT', msg.payload, localPlayerId);
+           engine?.addChatMessage('player', msg.payload.senderName, msg.payload.text, msg.payload.senderId, msg.payload.id);
+           if (isHost && msg.senderId !== localPlayerId) {
+             // Host relays to other clients, excluding original sender
+             netRef.current?.broadcast('CHAT', msg.payload, localPlayerId, msg.senderId);
            }
         } else if (msg.type === 'AUTH_ERROR') {
            setStatus(`ERROR:${msg.payload}`);
@@ -209,7 +264,7 @@ export default function GamePage() {
     return () => {
       network.disconnect();
     };
-  }, [localPlayerId, localColor, localPlayerName, localAvatar, joiningPassword]);
+  }, [localPlayerId]); // Only restart if ID changes (which shouldn't happen)
 
     const onEngineStateChange = (state: GameState, previousState?: GameState) => {
       setGameState(state);
@@ -239,6 +294,11 @@ export default function GamePage() {
       engineRef.current = engine;
       setGameState(engine.getState());
       setIsJoined(true);
+
+      // Save recent
+      const newRecent = [{id: peerId, name: roomSettings.roomName}, ...recentRooms.filter(r => r.id !== peerId)].slice(0, 5);
+      setRecentRooms(newRecent);
+      localStorage.setItem('tycoon_recent_rooms', JSON.stringify(newRecent));
     };
 
     const handleStartGame = () => {
@@ -260,8 +320,10 @@ export default function GamePage() {
       const player = engineRef.current.getState().players.find(p => p.id === localPlayerId);
       if (!player) return;
       
-      engineRef.current.addChatMessage('player', player.name, chatInput, localPlayerId);
+      const msgId = Math.random().toString(36).substring(7);
+      engineRef.current.addChatMessage('player', player.name, chatInput, localPlayerId, msgId);
       netRef.current?.broadcast('CHAT', {
+          id: msgId,
           senderId: localPlayerId,
           senderName: player.name,
           text: chatInput
@@ -270,10 +332,11 @@ export default function GamePage() {
       setChatInput('');
     };
 
-    const joinRoom = () => {
-      if (!roomId) return;
+    const joinRoom = (id?: string) => {
+      const targetId = id || roomId;
+      if (!targetId) return;
       setStatus('Подключение...');
-      netRef.current?.connect(roomId);
+      netRef.current?.connect(targetId);
       
       const p: Player = { 
         id: localPlayerId, 
@@ -287,6 +350,11 @@ export default function GamePage() {
 
       const engine = new GameEngine([p], onEngineStateChange);
       engineRef.current = engine;
+
+      // Add to recent rooms
+      const newRecent = [{id: targetId, name: `Комната ${targetId.slice(0, 4)}`}, ...recentRooms.filter(r => r.id !== targetId)].slice(0, 5);
+      setRecentRooms(newRecent);
+      localStorage.setItem('tycoon_recent_rooms', JSON.stringify(newRecent));
     };
 
   const handleRoll = () => {
@@ -435,6 +503,33 @@ export default function GamePage() {
           </div>
 
           <div className="space-y-6">
+            {publicRooms.length > 0 && (
+              <div className="space-y-3">
+                <p className="text-[10px] text-[#3390EC] uppercase font-black text-center tracking-widest">Открытые игры</p>
+                <div className="flex flex-col gap-2 max-h-[160px] overflow-y-auto no-scrollbar pr-1">
+                  {publicRooms.map(room => (
+                    <button 
+                      key={room.id}
+                      onClick={() => joinRoom(room.id)}
+                      disabled={room.isStarted || room.playerCount >= room.maxPlayers}
+                      className="group w-full bg-[#2C2C2E] border border-white/5 p-4 rounded-2xl flex items-center justify-between text-left hover:bg-[#3390EC]/10 transition-colors disabled:opacity-50"
+                    >
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-sm font-black text-white group-hover:text-[#3390EC] transition-colors">{room.name}</span>
+                        <span className="text-[10px] text-gray-500 uppercase font-bold">Офис {room.hostName}</span>
+                      </div>
+                      <div className="flex flex-col items-end gap-1">
+                        <span className="text-[10px] bg-[#3390EC] text-white px-2 py-0.5 rounded-full font-black">
+                          {room.playerCount}/{room.maxPlayers}
+                        </span>
+                        {room.isStarted && <span className="text-[8px] text-gray-500 font-bold uppercase italic">В игре</span>}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="space-y-3">
               <button 
                 onClick={startAsHost}
@@ -466,13 +561,31 @@ export default function GamePage() {
                 className="w-full bg-[#2C2C2E] p-4 rounded-xl text-center text-white focus:ring-2 focus:ring-[#3390EC] outline-none"
               />
               <button 
-                onClick={joinRoom}
+                onClick={() => joinRoom()}
                 disabled={!roomId}
                 className="w-full bg-white text-[#1C1C1D] p-4 rounded-xl font-bold disabled:opacity-50 active:scale-95 transition-all"
               >
                 Присоединиться
               </button>
             </div>
+
+            {recentRooms.length > 0 && (
+              <div className="space-y-3">
+                <p className="text-[10px] text-gray-500 uppercase font-black text-center tracking-widest">Недавние комнаты</p>
+                <div className="flex flex-col gap-2">
+                  {recentRooms.map(room => (
+                    <button 
+                      key={room.id}
+                      onClick={() => joinRoom(room.id)}
+                      className="w-full bg-[#2C2C2E]/50 border border-white/5 p-3 rounded-xl flex items-center justify-between text-xs font-bold hover:bg-[#2C2C2E] transition-colors"
+                    >
+                      <span className="text-gray-300">{room.name}</span>
+                      <span className="text-[#3390EC] font-mono">{room.id.slice(0, 6)}...</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -970,11 +1083,37 @@ export default function GamePage() {
                    >
                      НАЧАТЬ ИГРУ
                    </button>
+                   <button 
+                     onClick={() => {
+                        netRef.current?.disconnect();
+                        setIsJoined(false);
+                        engineRef.current = null;
+                        setGameState(null);
+                        window.location.reload();
+                     }}
+                     className="w-full h-12 text-gray-500 font-black uppercase text-xs tracking-widest active:text-white"
+                   >
+                     ← Вернуться на главную
+                   </button>
                 </div>
               )}
 
               {!gameState?.players.find(p => p.id === localPlayerId)?.isHost && (
-                <p className="text-gray-500 animate-pulse italic">Дождитесь, пока хост запустит систему...</p>
+                <div className="space-y-4 w-full">
+                  <p className="text-gray-500 animate-pulse italic">Дождитесь, пока хост запустит систему...</p>
+                  <button 
+                     onClick={() => {
+                        netRef.current?.disconnect();
+                        setIsJoined(false);
+                        engineRef.current = null;
+                        setGameState(null);
+                        window.location.reload();
+                     }}
+                     className="w-full h-12 text-gray-500 font-black uppercase text-xs tracking-widest active:text-white"
+                   >
+                     ← К списку игр
+                   </button>
+                </div>
               )}
            </div>
         </div>
@@ -1028,7 +1167,13 @@ export default function GamePage() {
                animate={{ scale: 1, opacity: 1 }}
                className="bg-[#1C1C1D] p-6 rounded-3xl w-full max-w-sm space-y-6 border border-white/10"
              >
-                <div className="text-center">
+                <div className="text-center relative">
+                  <button 
+                    onClick={() => setIsRoomSettingsOpen(false)}
+                    className="absolute left-0 top-0 w-8 h-8 flex items-center justify-center text-gray-500"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                  </button>
                   <h3 className="text-xl font-black text-[#3390EC] uppercase tracking-widest">Настройки комнаты</h3>
                 </div>
                 
@@ -1102,10 +1247,11 @@ export default function GamePage() {
             className="fixed inset-y-0 right-0 w-full max-w-sm bg-[#1C1C1D] z-[120] flex flex-col shadow-2xl border-l border-white/5"
           >
              <div className="h-[70px] flex items-center justify-between px-6 border-b border-white/5">
-                <span className="font-black text-lg text-[#3390EC] uppercase tracking-widest">Сетевой Чат</span>
                 <button onClick={() => setIsChatOpen(false)} className="w-10 h-10 rounded-full bg-[#2C2C2E] flex items-center justify-center">
-                   <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                   <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
                 </button>
+                <span className="font-black text-lg text-[#3390EC] uppercase tracking-widest">Сетевой Чат</span>
+                <div className="w-10" />
              </div>
 
              <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -1179,13 +1325,24 @@ export default function GamePage() {
               {/* Pill */}
               <div className="w-12 h-1.5 bg-gray-500 rounded-full mx-auto mb-6 opacity-30"></div>
 
+              <div className="flex justify-between items-center mb-6">
+                <button 
+                  onClick={() => setZoomedCell(null)}
+                  className="w-10 h-10 rounded-full bg-[#1C1C1D] flex items-center justify-center text-gray-500 shadow-lg active:scale-95 transition-all"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                </button>
+                <div className="text-right">
+                  <h2 className="text-3xl font-black italic tracking-tighter uppercase whitespace-pre-line leading-none">
+                    {cellsToDraw[zoomedCell].name}
+                  </h2>
+                </div>
+              </div>
+
               {cellsToDraw[zoomedCell].color && (
                 <div className="h-8 rounded-lg mb-4 opacity-80" style={{ backgroundColor: cellsToDraw[zoomedCell].color }} />
               )}
-              
-              <h2 className="text-2xl font-black mb-2 leading-tight">
-                {cellsToDraw[zoomedCell].name}
-              </h2>
+
               <p className="text-sm text-gray-400 mb-6 leading-relaxed">
                 {cellsToDraw[zoomedCell].description}
               </p>

@@ -68,10 +68,10 @@ export class NetworkManager {
     });
   }
 
-  public broadcast(type: string, payload: any, senderId: string): void {
+  public broadcast(type: string, payload: any, senderId: string, excludePeerId?: string): void {
     const msg: GameMessage = { type: type as any, payload, senderId };
     this.connections.forEach(conn => {
-      if (conn.open) {
+      if (conn.open && conn.peer !== excludePeerId) {
         conn.send(msg);
       }
     });

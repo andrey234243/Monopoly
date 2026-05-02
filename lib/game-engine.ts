@@ -8,6 +8,7 @@ export class GameEngine {
   constructor(initialPlayers: Player[], onStateChange: (state: GameState, prevState?: GameState) => void) {
     this.state = {
       isStarted: false,
+      version: 0,
       players: initialPlayers,
       currentPlayerId: initialPlayers[0]?.id || '',
       lastRoll: null,
@@ -96,6 +97,7 @@ export class GameEngine {
   }
 
   private notifyStateChange(prevState: GameState) {
+    this.state.version++;
     this.onStateChange({ ...this.state }, prevState);
   }
 
@@ -362,17 +364,19 @@ export class GameEngine {
     this.notifyStateChange(prevState);
   }
 
-  public addChatMessage(type: 'system' | 'player', senderName: string, text: string, senderId?: string): void {
+  public addChatMessage(type: 'system' | 'player', senderName: string, text: string, senderId?: string, msgId?: string): void {
+    if (msgId && this.state.chatMessages.find(m => m.id === msgId)) return;
+    
     const prevState = JSON.parse(JSON.stringify(this.state));
     const newMessage: ChatMessage = {
-      id: Math.random().toString(36).substring(7),
+      id: msgId || Math.random().toString(36).substring(7),
       type,
       senderId: senderId || 'system',
       senderName,
       text,
       timestamp: Date.now()
     };
-    this.state.chatMessages = [...this.state.chatMessages.slice(-20), newMessage]; // Keep last 21 messages
+    this.state.chatMessages = [...this.state.chatMessages.slice(-20), newMessage]; 
     this.notifyStateChange(prevState);
   }
 
