@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import Image from 'next/image';
 import { motion, AnimatePresence } from 'motion/react';
 import { BOARD_CELLS } from '@/lib/board-data';
 import { GameEngine } from '@/lib/game-engine';
@@ -54,6 +55,19 @@ const playSound = (type: 'dice' | 'move' | 'message') => {
   } catch (e) {}
 };
 
+// Custom Hook to manage auth state
+function useAuthReady() {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const init = async () => {
+      const { auth } = await import('@/lib/firebase');
+      auth.onAuthStateChanged(u => { if (u) setReady(true); });
+    };
+    init();
+  }, []);
+  return ready;
+}
+
 // Custom Hook to manage dice animation
 function useFastDiceRoller(lastRoll: [number, number] | null | undefined, turnStatus?: string, onComplete?: () => void, isSoundEnabledRef?: React.MutableRefObject<boolean>) {
   const [animatedRoll, setAnimatedRoll] = useState<[number, number]>([1, 1]);
@@ -89,6 +103,7 @@ function useFastDiceRoller(lastRoll: [number, number] | null | undefined, turnSt
 
 export default function GamePage() {
   const [gameState, setGameState] = useState<GameState | null>(null);
+  const authReady = useAuthReady();
   const engineRef = useRef<GameEngine | null>(null);
   const netRef = useRef<NetworkManager | null>(null);
 
@@ -131,6 +146,25 @@ export default function GamePage() {
   const [userProfile, setUserProfile] = useState<{ gamesPlayed: number, wins: number, totalWealthPeak: number, totalRentsCollected: number } | null>(null);
   const [hasSavedProfileStats, setHasSavedProfileStats] = useState(false);
   const [advancedTradeSetup, setAdvancedTradeSetup] = useState<{ active: boolean, targetId: string, offerCells: number[], requestCells: number[], offerMoney: string, requestMoney: string } | null>(null);
+
+  // --- HTML DOM BOARD CALCULATION ---
+  // Enhance cells from gameState with static data from BOARD_CELLS (like logoUrl, description)
+  // This ensures that even if a game state is stale, we still display current asset metadata.
+  const cellsToDraw = useMemo(() => {
+    if (!gameState) {
+      return BOARD_CELLS;
+    }
+    return gameState.cells.map((cell) => {
+      const staticCell = BOARD_CELLS.find(bc => bc.id === cell.id);
+      return {
+        ...cell,
+        logoUrl: staticCell?.logoUrl || cell.logoUrl,
+        description: staticCell?.description || cell.description,
+        name: staticCell?.name || cell.name,
+        color: staticCell?.color || cell.color,
+      };
+    });
+  }, [gameState]);
 
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
@@ -270,6 +304,9 @@ export default function GamePage() {
 
     const fetchMatches = async () => {
        try {
+           const { auth } = await import('@/lib/firebase');
+           if (!auth.currentUser) return; // Wait for auth
+
            const { collection, query, orderBy, limit, getDocs } = await import('firebase/firestore');
            const { db } = await import('@/lib/firebase');
            const q = query(collection(db, 'matches'), orderBy('createdAt', 'desc'), limit(20));
@@ -285,7 +322,7 @@ export default function GamePage() {
     fetchMatches();
     const interval = setInterval(fetchRooms, 10000);
     return () => clearInterval(interval);
-  }, [isJoined]);
+  }, [isJoined, authReady]);
 
   // Host Ping
   useEffect(() => {
@@ -346,19 +383,23 @@ export default function GamePage() {
     };
 
     initTMA();
+  }, [localPlayerId]);
 
-    const notifyError = async (errorText: string) => {
-        try {
-            const WebApp = (await import('@twa-dev/sdk')).default;
-            if (WebApp.isVersionAtLeast('6.2')) {
-                WebApp.showAlert(errorText);
-            } else {
-                alert(errorText);
-            }
-        } catch {
-            alert(errorText);
-        }
-    };
+  const notifyError = useCallback(async (errorText: string) => {
+    try {
+      const WebApp = (await import('@twa-dev/sdk')).default;
+      if (WebApp.isVersionAtLeast('6.2')) {
+        WebApp.showAlert(errorText);
+      } else {
+        alert(errorText);
+      }
+    } catch {
+      alert(errorText);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !localPlayerId) return;
 
     const network = new NetworkManager(
       (msg) => {
@@ -446,249 +487,249 @@ export default function GamePage() {
     return () => {
       network.disconnect();
     };
-  }, [localPlayerId]); // Only restart if ID changes (which shouldn't happen)
+  }, [localPlayerId, localAvatar, localColor, localPlayerName, joiningPassword, notifyError]);
 
-    const onEngineStateChange = async (state: GameState, previousState?: GameState) => {
-      setGameState(state);
-      
-      const wasLocalTurn = previousState?.currentPlayerId === localPlayerId;
-      const isLocalTurn = state.currentPlayerId === localPlayerId;
-      const isHost = engineRef.current?.getState().players.find(p => p.id === localPlayerId)?.isHost;
-      
-      // Broadcast if it IS our turn, WAS our turn, or we are the host syncing.
-      if (isLocalTurn || wasLocalTurn || isHost) {
-        netRef.current?.broadcast('GAME_STATE', state, localPlayerId);
-      }
-      
-      // FIREBASE CLOUD SAVE (Host Only)
-      if (isHost && isJoined) {
-          try {
-             const { doc, setDoc } = await import('firebase/firestore');
-             const { db, auth } = await import('@/lib/firebase');
-             if (auth.currentUser) {
-                 await setDoc(doc(db, 'rooms', peerId || roomId), {
-                    id: peerId || roomId,
-                    name: state.roomName || 'Room',
-                    hostId: auth.currentUser.uid,
-                    gameState: JSON.stringify(state),
-                    createdAt: state.isStarted ? +(new Date()) : +(new Date()),
-                    updatedAt: +(new Date())
-                 }, { merge: true });
-             }
-          } catch (e) {
-             console.error("Cloud save failed", e);
-          }
-      }
-    };
+  const onEngineStateChange = async (state: GameState, previousState?: GameState) => {
+    setGameState(state);
+    
+    const wasLocalTurn = previousState?.currentPlayerId === localPlayerId;
+    const isLocalTurn = state.currentPlayerId === localPlayerId;
+    const isHost = engineRef.current?.getState().players.find(p => p.id === localPlayerId)?.isHost;
+    
+    // Broadcast if it IS our turn, WAS our turn, or we are the host syncing.
+    if (isLocalTurn || wasLocalTurn || isHost) {
+      netRef.current?.broadcast('GAME_STATE', state, localPlayerId);
+    }
+    
+    // FIREBASE CLOUD SAVE (Host Only)
+    if (isHost && isJoined) {
+        try {
+           const { doc, setDoc } = await import('firebase/firestore');
+           const { db, auth } = await import('@/lib/firebase');
+           if (auth.currentUser) {
+               await setDoc(doc(db, 'rooms', peerId || roomId), {
+                  id: peerId || roomId,
+                  name: state.roomName || 'Room',
+                  hostId: auth.currentUser.uid,
+                  gameState: JSON.stringify(state),
+                  createdAt: state.isStarted ? +(new Date()) : +(new Date()),
+                  updatedAt: +(new Date())
+               }, { merge: true });
+           }
+        } catch (e) {
+           console.error("Cloud save failed", e);
+        }
+    }
+  };
 
-    // BOT LOGIC (Host solely responsible for bots)
-    useEffect(() => {
-       if (!gameState || !gameState.isStarted || !isJoined || !engineRef.current) return;
-       const isHost = gameState.players.find(p => p.id === localPlayerId)?.isHost;
-       if (!isHost) return;
+  // BOT LOGIC (Host solely responsible for bots)
+  useEffect(() => {
+     if (!gameState || !gameState.isStarted || !isJoined || !engineRef.current) return;
+     const isHost = gameState.players.find(p => p.id === localPlayerId)?.isHost;
+     if (!isHost) return;
 
-       const engine = engineRef.current;
+     const engine = engineRef.current;
 
-       // BOT TRADE RESPONSE logic
-       if (gameState.pendingTrade) {
-          const targetId = gameState.pendingTrade.toId;
-          const target = gameState.players.find(p => p.id === targetId);
-          if (target?.isBot) {
-             const tradeId = gameState.pendingTrade.id || Math.random().toString();
-             if ((window as any).lastProcessedTrade !== tradeId) {
-                (window as any).lastProcessedTrade = tradeId;
-                setTimeout(() => {
-                   const s = engine.getState();
-                   if (!s.pendingTrade) return;
-                   
-                   const trade = s.pendingTrade;
-                   let botEvaluation = 0;
-                   
-                   // Add value for what bot gets
-                   trade.offerCellIds.forEach((id: number) => {
-                       const cell = s.cells[id];
-                       botEvaluation += (cell.price || 100) * 1.5;
-                   });
-                   botEvaluation += trade.offerMoney;
-                   
-                   // Subtract value for what bot gives
-                   trade.requestCellIds.forEach((id: number) => {
-                       const cell = s.cells[id];
-                       botEvaluation -= (cell.price || 100) * 1.5;
-                   });
-                   botEvaluation -= trade.requestMoney;
-                   
-                   if (target.balance >= trade.requestMoney && botEvaluation >= 0) {
-                      engine.acceptTrade();
-                      engine.addChatMessage('system', 'Бот', `${target.name} принял предложение об обмене.`);
-                   } else {
-                      engine.rejectTrade();
-                      engine.addChatMessage('system', 'Бот', `${target.name} отклонил предложение об обмене.`);
-                   }
-                }, 2000);
-             }
-          }
-       }
+     // BOT TRADE RESPONSE logic
+     if (gameState.pendingTrade) {
+        const targetId = gameState.pendingTrade.toId;
+        const target = gameState.players.find(p => p.id === targetId);
+        if (target?.isBot) {
+           const tradeId = gameState.pendingTrade.id || Math.random().toString();
+           if ((window as any).lastProcessedTrade !== tradeId) {
+              (window as any).lastProcessedTrade = tradeId;
+              setTimeout(() => {
+                 const s = engine.getState();
+                 if (!s.pendingTrade) return;
+                 
+                 const trade = s.pendingTrade;
+                 let botEvaluation = 0;
+                 
+                 // Add value for what bot gets
+                 trade.offerCellIds.forEach((id: number) => {
+                     const cell = s.cells[id];
+                     botEvaluation += (cell.price || 100) * 1.5;
+                 });
+                 botEvaluation += trade.offerMoney;
+                 
+                 // Subtract value for what bot gives
+                 trade.requestCellIds.forEach((id: number) => {
+                     const cell = s.cells[id];
+                     botEvaluation -= (cell.price || 100) * 1.5;
+                 });
+                 botEvaluation -= trade.requestMoney;
+                 
+                 if (target.balance >= trade.requestMoney && botEvaluation >= 0) {
+                    engine.acceptTrade();
+                    engine.addChatMessage('system', 'Бот', `${target.name} принял предложение об обмене.`);
+                 } else {
+                    engine.rejectTrade();
+                    engine.addChatMessage('system', 'Бот', `${target.name} отклонил предложение об обмене.`);
+                 }
+              }, 2000);
+           }
+        }
+     }
 
-       const tStatus = gameState.turnStatus;
-       
-       if (tStatus === 'AUCTION') {
-          const auc = gameState.activeAuction;
-          if (!auc) return;
-          const bidderId = auc.bidders[auc.turnIndex];
-          const bidder = gameState.players.find(p => p.id === bidderId);
-          if (bidder?.isBot) {
-             const aucKey = `auc_${auc.cellId}_${auc.currentBid}_${auc.turnIndex}_${gameState.version}`;
-             if ((window as any).lastAucKey === aucKey) return;
-             (window as any).lastAucKey = aucKey;
+     const tStatus = gameState.turnStatus;
+     
+     if (tStatus === 'AUCTION') {
+        const auc = gameState.activeAuction;
+        if (!auc) return;
+        const bidderId = auc.bidders[auc.turnIndex];
+        const bidder = gameState.players.find(p => p.id === bidderId);
+        if (bidder?.isBot) {
+           const aucKey = `auc_${auc.cellId}_${auc.currentBid}_${auc.turnIndex}_${gameState.version}`;
+           if ((window as any).lastAucKey === aucKey) return;
+           (window as any).lastAucKey = aucKey;
 
-             setTimeout(() => {
-                const s = engine.getState();
-                const currentAuc = s.activeAuction;
-                if (!currentAuc || currentAuc.bidders[currentAuc.turnIndex] !== bidderId) return;
+           setTimeout(() => {
+              const s = engine.getState();
+              const currentAuc = s.activeAuction;
+              if (!currentAuc || currentAuc.bidders[currentAuc.turnIndex] !== bidderId) return;
 
-                const cell = s.cells[currentAuc.cellId];
-                if (bidder.balance > currentAuc.currentBid + 50 && (currentAuc.currentBid < (cell.price || 0) * (bidder.botStrategy === 'AGGRESSIVE' ? 1.5 : 0.8))) {
-                   engine.auctionBid(bidder.id, currentAuc.currentBid + 10);
-                } else {
-                   engine.auctionPass(bidder.id);
-                }
-             }, 1000);
-          }
-          return;
-       }
+              const cell = s.cells[currentAuc.cellId];
+              if (bidder.balance > currentAuc.currentBid + 50 && (currentAuc.currentBid < (cell.price || 0) * (bidder.botStrategy === 'AGGRESSIVE' ? 1.5 : 0.8))) {
+                 engine.auctionBid(bidder.id, currentAuc.currentBid + 10);
+              } else {
+                 engine.auctionPass(bidder.id);
+              }
+           }, 1000);
+        }
+        return;
+     }
 
-       const player = gameState.players.find(p => p.id === gameState.currentPlayerId);
-       if (player?.isBot) {
-          const actionKey = `bot_${player.id}_${tStatus}_${gameState.currentAction?.cellId || 'no_action'}_${gameState.version}`;
-          if ((window as any).lastActionKey === actionKey) return;
-          (window as any).lastActionKey = actionKey;
+     const player = gameState.players.find(p => p.id === gameState.currentPlayerId);
+     if (player?.isBot) {
+        const actionKey = `bot_${player.id}_${tStatus}_${gameState.currentAction?.cellId || 'no_action'}_${gameState.version}`;
+        if ((window as any).lastActionKey === actionKey) return;
+        (window as any).lastActionKey = actionKey;
 
-          if (tStatus === 'WAITING_ROLL') {
-             setTimeout(() => {
-                const s = engine.getState();
-                if (s.turnStatus !== 'WAITING_ROLL' || s.currentPlayerId !== player.id) return;
+        if (tStatus === 'WAITING_ROLL') {
+           setTimeout(() => {
+              const s = engine.getState();
+              if (s.turnStatus !== 'WAITING_ROLL' || s.currentPlayerId !== player.id) return;
 
-                engine.rollDice();
-             }, 1500);
-          } else if (tStatus === 'ACTION_REQUIRED' && gameState.currentAction?.type === 'BUY') {
-             setTimeout(() => {
-                const s = engine.getState();
-                if (s.turnStatus !== 'ACTION_REQUIRED' || s.currentPlayerId !== player.id) return;
+              engine.rollDice();
+           }, 1500);
+        } else if (tStatus === 'ACTION_REQUIRED' && gameState.currentAction?.type === 'BUY') {
+           setTimeout(() => {
+              const s = engine.getState();
+              if (s.turnStatus !== 'ACTION_REQUIRED' || s.currentPlayerId !== player.id) return;
 
-                const cell = s.cells[s.currentAction!.cellId!];
-                if (player.balance >= (cell.price || 0) + (player.botStrategy === 'ECONOMICAL' ? 300 : 50)) {
-                   engine.buyAsset();
-                } else {
-                   engine.skipBuy();
-                }
-             }, 1500);
-          } else if (tStatus === 'END_TURN') {
-             setTimeout(() => {
-                const s = engine.getState();
-                if (s.turnStatus !== 'END_TURN' || s.currentPlayerId !== player.id) return;
+              const cell = s.cells[s.currentAction!.cellId!];
+              if (player.balance >= (cell.price || 0) + (player.botStrategy === 'ECONOMICAL' ? 300 : 50)) {
+                 engine.buyAsset();
+              } else {
+                 engine.skipBuy();
+              }
+           }, 1500);
+        } else if (tStatus === 'END_TURN') {
+           setTimeout(() => {
+              const s = engine.getState();
+              if (s.turnStatus !== 'END_TURN' || s.currentPlayerId !== player.id) return;
 
-                if (player.balance < 0) {
-                   engine.surrender(player.id);
-                } else {
-                   // Smarter upgrades
-                   const myAssets = s.cells.filter(c => c.ownerId === player.id);
-                   const mortgaged = myAssets.filter(c => c.isMortgaged);
-                   
-                   // Unmortgage if wealthy
-                   if (mortgaged.length > 0 && player.balance > (mortgaged[0].price || 100) * 1.5) {
-                      engine.unmortgageAsset(mortgaged[0].id);
-                   }
+              if (player.balance < 0) {
+                 engine.surrender(player.id);
+              } else {
+                 // Smarter upgrades
+                 const myAssets = s.cells.filter(c => c.ownerId === player.id);
+                 const mortgaged = myAssets.filter(c => c.isMortgaged);
+                 
+                 // Unmortgage if wealthy
+                 if (mortgaged.length > 0 && player.balance > (mortgaged[0].price || 100) * 1.5) {
+                    engine.unmortgageAsset(mortgaged[0].id);
+                 }
 
-                   // Upgrade if monopoly owned
-                   const upgradable = s.cells.filter(c => c.ownerId === player.id && (c.upgradeLevel || 0) < 2);
-                   const colorToUpgrade = upgradable.find(u => {
-                       const set = s.cells.filter(c => c.type === CellType.ASSET && c.color === u.color);
-                       return set.every(c => c.ownerId === player.id && !c.isMortgaged);
-                   });
+                 // Upgrade if monopoly owned
+                 const upgradable = s.cells.filter(c => c.ownerId === player.id && (c.upgradeLevel || 0) < 2);
+                 const colorToUpgrade = upgradable.find(u => {
+                     const set = s.cells.filter(c => c.type === CellType.ASSET && c.color === u.color);
+                     return set.every(c => c.ownerId === player.id && !c.isMortgaged);
+                 });
 
-                   if (colorToUpgrade && player.balance > 400) {
-                      engine.upgradeAsset(colorToUpgrade.id);
-                   }
+                 if (colorToUpgrade && player.balance > 400) {
+                    engine.upgradeAsset(colorToUpgrade.id);
+                 }
 
-                   engine.nextTurn();
-                }
-             }, 1000);
-          }
-       }
-    }, [gameState?.turnStatus, gameState?.currentPlayerId, gameState?.activeAuction?.turnIndex, gameState?.pendingTrade]);
+                 engine.nextTurn();
+              }
+           }, 1000);
+        }
+     }
+  }, [gameState?.turnStatus, gameState?.currentPlayerId, gameState?.activeAuction?.turnIndex, gameState?.pendingTrade, isJoined, localPlayerId]);
 
-    // Save profile stats on game over
-    useEffect(() => {
-       if (gameState?.turnStatus === 'GAME_OVER' && gameState.isStarted && !hasSavedProfileStats) {
-          const saveStats = async () => {
-             setHasSavedProfileStats(true);
-             try {
-                const { doc, getDoc, setDoc } = await import('firebase/firestore');
-                const { db, auth } = await import('@/lib/firebase');
-                if (!auth.currentUser) return;
-                
-                const userRef = doc(db, 'users', auth.currentUser.uid);
-                const userSnap = await getDoc(userRef);
-                
-                let currentProfile: any = { gamesPlayed: 0, wins: 0, totalWealthPeak: 0, totalRentsCollected: 0 };
-                if (userSnap.exists()) {
-                   currentProfile = userSnap.data();
-                }
-                
-                const p = gameState.players.find(p => p.id === localPlayerId);
-                const isWinner = gameState.winnerId === localPlayerId;
-                
-                let myWealth = 0;
-                if (p) {
-                   myWealth = p.balance + gameState.cells.filter(c => c.ownerId === p.id).reduce((sum, c) => sum + (c.price || 0), 0);
-                }
-                
-                const myCollectedRent = gameState.cells.filter(c => c.ownerId === localPlayerId).reduce((sum, c) => sum + (gameState.stats?.cellRents[c.id] || 0), 0);
+  // Save profile stats on game over
+  useEffect(() => {
+     if (gameState?.turnStatus === 'GAME_OVER' && gameState.isStarted && !hasSavedProfileStats) {
+        const saveStats = async () => {
+           setHasSavedProfileStats(true);
+           try {
+              const { doc, getDoc, setDoc } = await import('firebase/firestore');
+              const { db, auth } = await import('@/lib/firebase');
+              if (!auth.currentUser) return;
+              
+              const userRef = doc(db, 'users', auth.currentUser.uid);
+              const userSnap = await getDoc(userRef);
+              
+              let currentProfile: any = { gamesPlayed: 0, wins: 0, totalWealthPeak: 0, totalRentsCollected: 0 };
+              if (userSnap.exists()) {
+                 currentProfile = userSnap.data();
+              }
+              
+              const p = gameState.players.find(p => p.id === localPlayerId);
+              const isWinner = gameState.winnerId === localPlayerId;
+              
+              let myWealth = 0;
+              if (p) {
+                 myWealth = p.balance + gameState.cells.filter(c => c.ownerId === p.id).reduce((sum, c) => sum + (c.price || 0), 0);
+              }
+              
+              const myCollectedRent = gameState.cells.filter(c => c.ownerId === localPlayerId).reduce((sum, c) => sum + (gameState.stats?.cellRents[c.id] || 0), 0);
 
-                await setDoc(userRef, {
-                   id: auth.currentUser.uid,
-                   gamesPlayed: currentProfile.gamesPlayed + 1,
-                   wins: currentProfile.wins + (isWinner ? 1 : 0),
-                   totalWealthPeak: Math.max(currentProfile.totalWealthPeak || 0, myWealth),
-                   totalRentsCollected: (currentProfile.totalRentsCollected || 0) + myCollectedRent,
-                   createdAt: currentProfile.createdAt || +(new Date()),
-                   updatedAt: +(new Date())
-                }, { merge: true });
+              await setDoc(userRef, {
+                 id: auth.currentUser.uid,
+                 gamesPlayed: currentProfile.gamesPlayed + 1,
+                 wins: currentProfile.wins + (isWinner ? 1 : 0),
+                 totalWealthPeak: Math.max(currentProfile.totalWealthPeak || 0, myWealth),
+                 totalRentsCollected: (currentProfile.totalRentsCollected || 0) + myCollectedRent,
+                 createdAt: currentProfile.createdAt || +(new Date()),
+                 updatedAt: +(new Date())
+              }, { merge: true });
 
-                const isHost = gameState.players.find(p => p.id === localPlayerId)?.isHost;
-                if (isHost && peerId) {
-                   const matchRef = doc(db, 'matches', peerId);
-                   let maxCap = 0;
-                   const pls = gameState.players.map(pl => {
-                      const plWealth = pl.balance + gameState.cells.filter(c => c.ownerId === pl.id).reduce((sum, c) => sum + (c.price || 0), 0);
-                      if (plWealth > maxCap) maxCap = plWealth;
-                      return {
-                         id: pl.id,
-                         name: pl.name,
-                         color: pl.color,
-                         wealth: plWealth
-                      };
-                   });
-                   const winner = gameState.players.find(pl => pl.id === gameState.winnerId);
-                   await setDoc(matchRef, {
-                      id: peerId,
-                      roomName: gameState.roomName || 'Без названия',
-                      winnerName: winner ? winner.name : 'Неизвестно',
-                      winnerId: gameState.winnerId || '',
-                      players: pls,
-                      durationStr: `${gameState.version} ходов`,
-                      maxCapital: maxCap,
-                      createdAt: +(new Date())
-                   });
-                }
-             } catch (e) {
-                console.error("Failed to save profile stats", e);
-             }
-          };
-          saveStats();
-       }
-    }, [gameState?.turnStatus, gameState?.isStarted, hasSavedProfileStats, localPlayerId]);
+              const isHost = gameState.players.find(p => p.id === localPlayerId)?.isHost;
+              if (isHost && peerId) {
+                 const matchRef = doc(db, 'matches', peerId);
+                 let maxCap = 0;
+                 const pls = gameState.players.map(pl => {
+                    const plWealth = pl.balance + gameState.cells.filter(c => c.ownerId === pl.id).reduce((sum, c) => sum + (c.price || 0), 0);
+                    if (plWealth > maxCap) maxCap = plWealth;
+                    return {
+                       id: pl.id,
+                       name: pl.name,
+                       color: pl.color,
+                       wealth: plWealth
+                    };
+                 });
+                 const winner = gameState.players.find(pl => pl.id === gameState.winnerId);
+                 await setDoc(matchRef, {
+                    id: peerId,
+                    roomName: gameState.roomName || 'Без названия',
+                    winnerName: winner ? winner.name : 'Неизвестно',
+                    winnerId: gameState.winnerId || '',
+                    players: pls,
+                    durationStr: `${gameState.version} ходов`,
+                    maxCapital: maxCap,
+                    createdAt: +(new Date())
+                 });
+              }
+           } catch (e) {
+              console.error("Failed to save profile stats", e);
+           }
+        };
+        saveStats();
+     }
+  }, [gameState?.turnStatus, gameState?.isStarted, hasSavedProfileStats, localPlayerId, peerId]);
 
     const startAsHost = () => {
       const p: Player = { 
@@ -1481,21 +1522,9 @@ export default function GamePage() {
     );
   }
 
-  // --- HTML DOM BOARD CALCULATION ---
-  // Enhance cells from gameState with static data from BOARD_CELLS (like logoUrl, description)
-  // This ensures that even if a game state is stale, we still display current asset metadata.
-  const cellsToDraw = useMemo(() => {
-    if (!gameState) return BOARD_CELLS;
-    return gameState.cells.map((cell, idx) => ({
-      ...cell,
-      logoUrl: BOARD_CELLS[idx]?.logoUrl,
-      description: BOARD_CELLS[idx]?.description || cell.description,
-      name: BOARD_CELLS[idx]?.name || cell.name,
-      color: BOARD_CELLS[idx]?.color || cell.color,
-    }));
-  }, [gameState]);
   const isLocalTurn = gameState?.currentPlayerId === localPlayerId;
 
+  // --- RENDERING LOGIC ---
   return (
     <main className="min-h-screen bg-[#1C1C1D] font-sans overflow-hidden">
       <AnimatePresence mode="wait">
@@ -2943,10 +2972,13 @@ export default function GamePage() {
                 <div className="text-right flex items-center justify-end gap-3 max-w-[70%]">
                                   {cellsToDraw[zoomedCell].logoUrl && (
                                     <div className="w-12 h-12 shrink-0 rounded-lg bg-white border border-gray-200 shadow flex items-center justify-center p-1 relative overflow-hidden">
-                                      <img 
+                                      <Image 
                                         src={cellsToDraw[zoomedCell].logoUrl} 
                                         alt={cellsToDraw[zoomedCell].name} 
-                                        className="w-full h-full object-contain p-1" 
+                                        fill
+                                        unoptimized
+                                        referrerPolicy="no-referrer"
+                                        className="object-contain p-1" 
                                       />
                                     </div>
                                   )}

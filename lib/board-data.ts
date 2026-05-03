@@ -21,7 +21,7 @@ export const BOARD_CELLS: Cell[] = [
   { id: 17, name: 'ВЗЛОМ', type: CellType.CHANCE, color: '#AF52DE', description: 'Выполнение брутфорс-атаки... Анализ уязвимых конечных точек.' },
   { id: 18, name: 'LINK', price: 180, rent: 14, type: CellType.ASSET, color: '#FF8C00', description: 'Упрощенная адресация. Высокий спрос со стороны институциональных игроков.', logoUrl: '/logos/link.png' },
   { id: 19, name: 'UNION', price: 200, rent: 16, type: CellType.ASSET, color: '#FF8C00', description: 'Имя, готовое к управлению. Критически важно для децентрализованных организаций.', logoUrl: '/logos/union.png' },
-  { id: 20, name: 'СЕРВЕРНЫЙ ХАБ', type: CellType.SPECIAL, description: 'Центральный узел пересечения трафика. Комиссия для верифицированных узлов отсутствует.' },
+  { id: 20, name: 'ИНСАЙД', type: CellType.CHANCE, color: '#AF52DE', description: 'Сетевой узел перегружен. Задержка пакетов. Анализ сетевого трафика на наличие аномалий.' },
   { id: 21, name: 'FLUX', price: 220, rent: 18, type: CellType.ASSET, color: '#FF0000', description: 'Модуль децентрализованного обмена. Обеспечивает базовую торговую функциональность.', logoUrl: '/logos/flux.png' },
   { id: 22, name: 'ИНСАЙД', type: CellType.CHANCE, color: '#AF52DE', description: 'Прямая передача из ядра администрирования. Расшифровка данных...' },
   { id: 23, name: 'TIDE', price: 220, rent: 18, type: CellType.ASSET, color: '#FF0000', description: 'Протокол автоматического маркет-мейкера. Жизненно важен для обмена активами.', logoUrl: '/logos/tide.png' },
