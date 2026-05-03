@@ -54,7 +54,11 @@ export default function GamePage() {
   const [isSoundEnabled, setIsSoundEnabled] = useState(true);
   const [localAvatar, setLocalAvatar] = useState<string>('https://api.dicebear.com/7.x/pixel-art/svg?seed=Felix');
   const [isProfileOpen, setIsProfileOpen] = useState(false);
-  const [profileTab, setProfileTab] = useState<'stats' | 'settings'>('stats');
+  const [profileTab, setProfileTab] = useState<'stats' | 'settings' | 'friends'>('stats');
+  const [friendSearchText, setFriendSearchText] = useState('');
+  const [friendsData, setFriendsData] = useState<any[]>([]);
+  const [isSearchingFriend, setIsSearchingFriend] = useState(false);
+  const [friendSearchResults, setFriendSearchResults] = useState<any[]>([]);
   const [roomSettings, setRoomSettings] = useState({
     roomName: 'Офис Магната',
     maxPlayers: 4,
@@ -612,12 +616,12 @@ export default function GamePage() {
       setIsSurrenderModalOpen(false);
     };
     
-    // Fetch profile
+    // Fetch profile and friends
     useEffect(() => {
        if (isProfileOpen) {
           const fetchProfile = async () => {
              try {
-                const { doc, getDoc } = await import('firebase/firestore');
+                const { doc, getDoc, collection, getDocs } = await import('firebase/firestore');
                 const { db, auth } = await import('@/lib/firebase');
                 const { onAuthStateChanged } = await import('firebase/auth');
                 
@@ -630,6 +634,11 @@ export default function GamePage() {
                     } else {
                        setUserProfile({ gamesPlayed: 0, wins: 0, totalWealthPeak: 0, totalRentsCollected: 0 });
                     }
+
+                    // fetch friends
+                    const friendsRef = collection(db, 'users', user.uid, 'friends');
+                    const friendsSnap = await getDocs(friendsRef);
+                    setFriendsData(friendsSnap.docs.map(d => d.data()));
                   }
                 });
              } catch (e) {
@@ -762,7 +771,7 @@ export default function GamePage() {
     engineRef.current?.upgradeAsset(cellId);
   };
 
-  const saveSettings = () => {
+  const saveSettings = async () => {
     localStorage.setItem('tycoon_name', localPlayerName);
     localStorage.setItem('tycoon_color', localColor);
     localStorage.setItem('tycoon_avatar', localAvatar);
@@ -773,6 +782,19 @@ export default function GamePage() {
             color: localColor,
             avatarUrl: localAvatar
         });
+    }
+
+    try {
+      const { doc, setDoc } = await import('firebase/firestore');
+      const { db, auth } = await import('@/lib/firebase');
+      if (auth.currentUser) {
+         await setDoc(doc(db, 'users', auth.currentUser.uid), {
+             nickname: localPlayerName,
+             avatarUrl: localAvatar
+         }, { merge: true });
+      }
+    } catch (e) {
+      console.error('Failed to sync profile settings to firestore', e);
     }
   };
 
@@ -814,6 +836,74 @@ export default function GamePage() {
     return () => clearInterval(interval);
   }, [gameState?.turnStartedAt, gameState?.turnStatus, localPlayerId, gameState?.isStarted]);
 
+  const searchFriend = async () => {
+     if (!friendSearchText.trim()) return;
+     setIsSearchingFriend(true);
+     setFriendSearchResults([]);
+     try {
+        const { collection, getDocs, query, where, doc, getDoc } = await import('firebase/firestore');
+        const { db } = await import('@/lib/firebase');
+        
+        let results: any[] = [];
+        
+        // Exact match by ID
+        try {
+           const userSnap = await getDoc(doc(db, 'users', friendSearchText.trim()));
+           if (userSnap.exists() && userSnap.id !== localPlayerId) {
+              results.push(userSnap.data());
+           }
+        } catch(e) {}
+        
+        // By nickname (prefix search)
+        if (results.length === 0) {
+           const usersRef = collection(db, 'users');
+           const searchText = friendSearchText.trim();
+           const q = query(
+               usersRef, 
+               where('nickname', '>=', searchText),
+               where('nickname', '<=', searchText + '\uf8ff')
+           );
+           const querySnapshot = await getDocs(q);
+           querySnapshot.forEach((doc) => {
+               if (doc.id !== localPlayerId && !results.find(r => r.id === doc.id)) {
+                   results.push(doc.data());
+               }
+           });
+        }
+        
+        setFriendSearchResults(results);
+     } catch(e) {
+        console.error("Search friend failed", e);
+     } finally {
+        setIsSearchingFriend(false);
+     }
+  };
+
+  const addFriend = async (friend: any) => {
+     try {
+         const { doc, setDoc } = await import('firebase/firestore');
+         const { db, auth } = await import('@/lib/firebase');
+         if (!auth.currentUser) return;
+         
+         await setDoc(doc(db, 'users', auth.currentUser.uid, 'friends', friend.id), {
+             id: friend.id,
+             friendId: friend.id,
+             nickname: friend.nickname || 'Игрок',
+             avatarUrl: friend.avatarUrl || '',
+             addedAt: +(new Date())
+         });
+         
+         setFriendsData(prev => {
+            if (prev.find(p => p.id === friend.id)) return prev;
+            return [...prev, friend];
+         });
+         setFriendSearchText('');
+         setFriendSearchResults([]);
+     } catch(e) {
+         console.error("Failed to add friend", e);
+     }
+  };
+
   if (isProfileOpen) {
     return (
       <main className="fixed inset-0 flex flex-col items-center justify-center bg-[#1C1C1D] z-50 p-6 text-white text-center">
@@ -839,20 +929,89 @@ export default function GamePage() {
              </div>
           </div>
           
-          <div className="flex bg-[#1C1C1D] rounded-xl p-1">
+          <div className="flex bg-[#1C1C1D] rounded-xl p-1 overflow-x-auto no-scrollbar">
             <button 
-              className={`flex-1 py-2 text-sm font-bold uppercase rounded-lg transition-colors ${profileTab === 'stats' ? 'bg-[#3390EC] text-white' : 'text-gray-400 hover:text-white'}`}
+              className={`flex-1 py-2 px-3 whitespace-nowrap text-xs font-bold uppercase rounded-lg transition-colors ${profileTab === 'stats' ? 'bg-[#3390EC] text-white' : 'text-gray-400 hover:text-white'}`}
               onClick={() => setProfileTab('stats')}
             >
-              Статистика
+              Стат
             </button>
             <button 
-              className={`flex-1 py-2 text-sm font-bold uppercase rounded-lg transition-colors ${profileTab === 'settings' ? 'bg-[#3390EC] text-white' : 'text-gray-400 hover:text-white'}`}
+              className={`flex-1 py-2 px-3 whitespace-nowrap text-xs font-bold uppercase rounded-lg transition-colors ${profileTab === 'friends' ? 'bg-[#3390EC] text-white' : 'text-gray-400 hover:text-white'}`}
+              onClick={() => setProfileTab('friends')}
+            >
+              Друзья
+            </button>
+            <button 
+              className={`flex-1 py-2 px-3 whitespace-nowrap text-xs font-bold uppercase rounded-lg transition-colors ${profileTab === 'settings' ? 'bg-[#3390EC] text-white' : 'text-gray-400 hover:text-white'}`}
               onClick={() => setProfileTab('settings')}
             >
               Настройки
             </button>
           </div>
+
+          {profileTab === 'friends' && (
+            <div className="space-y-4 text-left animate-in fade-in zoom-in-95">
+              <div className="flex gap-2">
+                <input 
+                  type="text"
+                  value={friendSearchText}
+                  onChange={(e) => setFriendSearchText(e.target.value)}
+                  placeholder="ID или ник"
+                  className="flex-1 bg-[#1C1C1D] p-3 rounded-xl text-white outline-none focus:ring-1 focus:ring-[#3390EC] text-sm"
+                  onKeyDown={(e) => e.key === 'Enter' && searchFriend()}
+                />
+                <button 
+                  onClick={searchFriend}
+                  disabled={isSearchingFriend || !friendSearchText.trim()}
+                  className="bg-[#3390EC] p-3 rounded-xl text-white font-bold disabled:opacity-50"
+                >
+                  {isSearchingFriend ? '...' : 'Поиск'}
+                </button>
+              </div>
+              
+              {friendSearchResults.length > 0 && (
+                <div className="bg-[#1C1C1D] rounded-xl p-2 space-y-2 max-h-[150px] overflow-y-auto">
+                  <p className="text-xs text-gray-500 font-bold uppercase tracking-wider px-2 pt-1 border-b border-white/5 pb-1">Результаты</p>
+                  {friendSearchResults.map(res => (
+                    <div key={res.id} className="flex items-center justify-between p-2 rounded-lg bg-[#2C2C2E] border border-white/5">
+                      <div className="flex items-center gap-2 overflow-hidden">
+                         <div className="w-8 h-8 rounded-full overflow-hidden bg-gray-700 shrink-0 border border-[#3390EC]/30">
+                            {res.avatarUrl ? <img src={res.avatarUrl} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center font-bold">{res.nickname?.charAt(0) || '?'}</div>}
+                         </div>
+                         <div className="flex flex-col truncate">
+                            <span className="font-bold text-sm truncate">{res.nickname || 'Unknown'}</span>
+                            <span className="text-[10px] text-gray-500 font-mono truncate">{res.id}</span>
+                         </div>
+                      </div>
+                      <button onClick={() => addFriend(res)} className="text-[#3390EC] font-bold text-xs bg-[#3390EC]/10 px-2 py-1 rounded">Добавить</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="bg-[#1C1C1D] rounded-xl p-2 space-y-2">
+                 <p className="text-xs text-gray-500 font-bold uppercase tracking-wider px-2 pt-1 border-b border-white/5 pb-1">Мои друзья ({friendsData.length})</p>
+                 {friendsData.length === 0 ? (
+                    <p className="text-center text-sm text-gray-500 py-4">Нет друзей</p>
+                 ) : (
+                    <div className="space-y-2 max-h-[200px] overflow-y-auto no-scrollbar">
+                      {friendsData.map(friend => (
+                        <div key={friend.id} className="flex items-center gap-3 p-2 rounded-lg bg-[#2C2C2E] border border-white/5">
+                           <div className="w-10 h-10 rounded-full overflow-hidden bg-gray-700 shrink-0 border border-white/10">
+                              {friend.avatarUrl ? <img src={friend.avatarUrl} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center font-bold text-lg">{friend.nickname?.charAt(0) || '?'}</div>}
+                           </div>
+                           <div className="flex flex-col truncate">
+                              <span className="font-bold text-sm truncate">{friend.nickname || 'Unknown'}</span>
+                              <span className="text-[10px] text-gray-500 font-mono truncate">{friend.id}</span>
+                           </div>
+                        </div>
+                      ))}
+                    </div>
+                 )}
+              </div>
+            </div>
+          )}
 
           {profileTab === 'stats' && (
             <div className="bg-[#1C1C1D] rounded-2xl p-4 space-y-4 text-left animate-in fade-in zoom-in-95">

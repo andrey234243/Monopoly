@@ -20,6 +20,8 @@
       "type": "object",
       "properties": {
         "id": { "type": "string" },
+        "nickname": { "type": "string" },
+        "avatarUrl": { "type": "string" },
         "gamesPlayed": { "type": "number" },
         "wins": { "type": "number" },
         "totalWealthPeak": { "type": "number" },
@@ -29,6 +31,19 @@
         "updatedAt": { "type": "number" }
       },
       "required": ["id", "gamesPlayed", "wins", "totalWealthPeak", "totalRentsCollected", "createdAt", "updatedAt"]
+    },
+    "Friend": {
+      "title": "Friend",
+      "description": "A user's friend connection",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "friendId": { "type": "string" },
+        "nickname": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "addedAt": { "type": "number" }
+      },
+      "required": ["id", "friendId", "addedAt"]
     }
   },
   "firestore": {
@@ -39,6 +54,10 @@
     "/users/{userId}": {
       "schema": { "$ref": "UserProfile" },
       "description": "Player profile and game statistics"
+    },
+    "/users/{userId}/friends/{friendId}": {
+      "schema": { "$ref": "Friend" },
+      "description": "A user's friend"
     }
   }
 }

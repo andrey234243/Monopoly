@@ -49,11 +49,23 @@ service cloud.firestore {
               data.totalWealthPeak is int &&
               data.totalRentsCollected is int &&
               data.createdAt is int &&
-              data.updatedAt is int;
+              data.updatedAt is int &&
+              (data.get('nickname', '') is string && data.get('nickname', '').size() <= 100) &&
+              (data.get('avatarUrl', '') is string && data.get('avatarUrl', '').size() <= 1000);
+    }
+
+    function isValidFriend(data) {
+        return data.keys().hasAll(['id', 'friendId', 'addedAt']) &&
+               data.id is string && data.id.size() <= 128 &&
+               data.friendId is string && data.friendId.size() <= 128 &&
+               data.addedAt is int &&
+               (data.get('nickname', '') is string && data.get('nickname', '').size() <= 100) &&
+               (data.get('avatarUrl', '') is string && data.get('avatarUrl', '').size() <= 1000);
     }
 
     match /users/{userId} {
       allow read: if isSignedIn();
+      allow list: if isSignedIn();
       allow create: if isSignedIn() &&
                     isValidId(userId) &&
                     isValidUserProfile(incoming()) &&
@@ -64,6 +76,18 @@ service cloud.firestore {
                     incoming().id == existing().id &&
                     incoming().id == request.auth.uid &&
                     incoming().createdAt == existing().createdAt;
+    }
+
+    match /users/{userId}/friends/{friendId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow list: if isSignedIn() && request.auth.uid == userId;
+      allow create: if isSignedIn() &&
+                    request.auth.uid == userId &&
+                    isValidId(friendId) &&
+                    isValidFriend(incoming()) &&
+                    incoming().id == friendId &&
+                    incoming().friendId == friendId;
+      allow delete: if isSignedIn() && request.auth.uid == userId;
     }
   }
 }
