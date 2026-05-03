@@ -149,24 +149,48 @@ export class GameEngine {
     if (!this.state.turnStartedAt) return;
     
     const status = this.state.turnStatus;
-    if (status === 'WAITING_ROLL') {
-      this.rollDice();
-    } else if (status === 'ACTION_REQUIRED') {
-      this.skipBuy();
-    } else if (status === 'AUCTION') {
+    
+    // Auction timeout
+    if (status === 'AUCTION') {
       const auction = this.state.activeAuction;
       if (auction) {
         const currentPlayerId = auction.bidders[auction.turnIndex];
-        this.auctionPass(currentPlayerId);
+        this.auctionPass(currentPlayerId, true);
       }
+      return;
+    }
+
+    // Main turn timeout
+    const currentPlayer = this.state.players.find(p => p.id === this.state.currentPlayerId);
+    if (!currentPlayer) return;
+
+    currentPlayer.missedTurns = (currentPlayer.missedTurns || 0) + 1;
+
+    if (currentPlayer.missedTurns >= 2) {
+      this.addChatMessage('system', 'Система', `${currentPlayer.name} исключен из игры за AFK (2 пропуска подряд).`);
+      this.surrender(currentPlayer.id);
+      return;
+    }
+
+    this.addChatMessage('system', 'Система', `${currentPlayer.name} пропускает ход по тайм-ауту.`);
+    
+    const prevState = JSON.parse(JSON.stringify(this.state));
+
+    if (status === 'WAITING_ROLL') {
+      this.state.consecutiveDoubles = 0;
+      this.setTurnStatus('END_TURN');
+      this.nextTurn(true);
+    } else if (status === 'ACTION_REQUIRED') {
+      this.skipBuy(true);
     } else if (status === 'END_TURN') {
-      const player = this.state.players.find(p => p.id === this.state.currentPlayerId);
-      if (player && player.balance < 0) {
-        this.surrender(player.id);
+      if (currentPlayer.balance < 0) {
+        this.surrender(currentPlayer.id);
       } else {
-        this.nextTurn();
+        this.nextTurn(true);
       }
     }
+
+    this.notifyStateChange(prevState);
   }
 
   public rollDice(): void {
@@ -174,6 +198,8 @@ export class GameEngine {
     if (!this.canPerformAction()) return;
 
     const prevState = JSON.parse(JSON.stringify(this.state));
+    const currentPlayer = this.state.players.find(p => p.id === this.state.currentPlayerId);
+    if (currentPlayer) currentPlayer.missedTurns = 0;
 
     const d1 = Math.floor(Math.random() * 6) + 1;
     const d2 = Math.floor(Math.random() * 6) + 1;
@@ -411,6 +437,7 @@ export class GameEngine {
     const playerIndex = this.state.players.findIndex(p => p.id === this.state.currentPlayerId);
     const cellIndex = this.state.currentAction.cellId;
     const player = this.state.players[playerIndex];
+    if (player) player.missedTurns = 0;
     const cell = this.state.cells[cellIndex];
 
     if (cell.price && player.balance >= cell.price) {
@@ -422,16 +449,22 @@ export class GameEngine {
         cellId: cellIndex,
         timestamp: Date.now()
       };
+      this.addChatMessage('system', 'Система', `${player.name} покупает ${cell.name} за $${cell.price}`);
       this.setTurnStatus('END_TURN');
       this.state.currentAction = undefined;
       this.notifyStateChange(prevState);
     }
   }
 
-  public skipBuy(): void {
+  public skipBuy(isTimeout: boolean = false): void {
     if (this.state.turnStatus !== 'ACTION_REQUIRED' || this.state.currentAction?.type !== 'BUY') return;
 
     const prevState = JSON.parse(JSON.stringify(this.state));
+    if (!isTimeout) {
+      const currentPlayer = this.state.players.find(p => p.id === this.state.currentPlayerId);
+      if (currentPlayer) currentPlayer.missedTurns = 0;
+    }
+    
     const cellId = this.state.currentAction.cellId;
     
     // Start Auction
@@ -461,6 +494,7 @@ export class GameEngine {
     const player = this.state.players.find(p => p.id === playerId);
     
     if (player && player.balance >= bidAmount) {
+       player.missedTurns = 0;
        auction.highestBidderId = playerId;
        auction.currentBid = bidAmount;
        this.addChatMessage('system', 'Аукцион', `${player.name} ставит $${bidAmount}`);
@@ -475,7 +509,7 @@ export class GameEngine {
     }
   }
 
-  public auctionPass(playerId: string): void {
+  public auctionPass(playerId: string, isTimeout: boolean = false): void {
     if (this.state.turnStatus !== 'AUCTION' || !this.state.activeAuction) return;
 
     const auction = this.state.activeAuction;
@@ -485,6 +519,7 @@ export class GameEngine {
     const player = this.state.players.find(p => p.id === playerId);
 
     if (player) {
+      if (!isTimeout) player.missedTurns = 0;
       this.addChatMessage('system', 'Аукцион', `${player.name} пасует.`);
     }
 
@@ -539,6 +574,7 @@ export class GameEngine {
     const playerIndex = this.state.players.findIndex(p => p.id === cell.ownerId);
     if (playerIndex === -1) return;
     const player = this.state.players[playerIndex];
+    player.missedTurns = 0;
 
     const upgradeLevel = cell.upgradeLevel || 0;
     if (upgradeLevel >= 2) return; // Max reached
@@ -567,6 +603,7 @@ export class GameEngine {
     const cell = this.state.cells[cellId];
     const player = this.state.players.find(p => p.id === cell.ownerId);
     if (!player || (cell.upgradeLevel || 0) <= 0) return;
+    player.missedTurns = 0;
 
     cell.upgradeLevel = (cell.upgradeLevel || 1) - 1;
     const refund = Math.floor((cell.price || 100) * 0.8 * 0.5); // 50% of upgrade cost
@@ -580,6 +617,7 @@ export class GameEngine {
     const cell = this.state.cells[cellId];
     const player = this.state.players.find(p => p.id === cell.ownerId);
     if (!player || cell.isMortgaged) return;
+    player.missedTurns = 0;
 
     // Cannot mortgage if there are upgrades on this color group
     const colorSet = this.state.cells.filter(c => c.type === CellType.ASSET && c.color === cell.color);
@@ -602,6 +640,7 @@ export class GameEngine {
     const cell = this.state.cells[cellId];
     const player = this.state.players.find(p => p.id === cell.ownerId);
     if (!player || !cell.isMortgaged) return;
+    player.missedTurns = 0;
 
     const unmortgageCost = Math.floor((cell.price || 0) * 0.6); // 50% + 10% fee
     if (player.balance >= unmortgageCost) {
@@ -650,6 +689,8 @@ export class GameEngine {
     requestCellIds: number[]
   ): void {
      const prevState = JSON.parse(JSON.stringify(this.state));
+     const currentPlayer = this.state.players.find(p => p.id === this.state.currentPlayerId);
+     if (currentPlayer) currentPlayer.missedTurns = 0;
      
      this.state.pendingTrade = {
         id: Math.random().toString(36).substring(7),
@@ -671,6 +712,8 @@ export class GameEngine {
 
      const fromPlayer = this.state.players.find(p => p.id === trade.fromId);
      const toPlayer = this.state.players.find(p => p.id === trade.toId);
+
+     if (toPlayer) toPlayer.missedTurns = 0;
 
      if (fromPlayer && toPlayer) {
         if (toPlayer.balance >= trade.requestMoney && fromPlayer.balance >= trade.offerMoney) {
@@ -706,6 +749,7 @@ export class GameEngine {
      const prevState = JSON.parse(JSON.stringify(this.state));
      const toPlayer = this.state.players.find(p => p.id === this.state.pendingTrade!.toId);
      if (toPlayer) {
+         toPlayer.missedTurns = 0;
          this.addChatMessage('system', 'Сделка', `${toPlayer.name} отклонил предложение об обмене.`);
      }
      this.state.pendingTrade = undefined;
@@ -740,6 +784,12 @@ export class GameEngine {
     if (msgId && this.state.chatMessages.find(m => m.id === msgId)) return;
     
     const prevState = JSON.parse(JSON.stringify(this.state));
+
+    if (senderId && senderId !== 'system') {
+       const player = this.state.players.find(p => p.id === senderId);
+       if (player) player.missedTurns = 0;
+    }
+
     const newMessage: ChatMessage = {
       id: msgId || Math.random().toString(36).substring(7),
       type,
@@ -770,10 +820,12 @@ export class GameEngine {
     }
   }
 
-  public nextTurn(): void {
+  public nextTurn(isTimeout: boolean = false): void {
     if (this.state.turnStatus !== 'END_TURN') return;
     
     const currentPlayer = this.state.players.find(p => p.id === this.state.currentPlayerId);
+    if (!isTimeout && currentPlayer) currentPlayer.missedTurns = 0;
+
     if (currentPlayer && currentPlayer.balance < 0 && !currentPlayer.isBankrupt) {
        this.addChatMessage('system', 'Должник', `${currentPlayer.name}, ваш баланс отрицательный. Оплатите долги или объявите банкротство.`);
        // Need to re-trigger state change to show notification

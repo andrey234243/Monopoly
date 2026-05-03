@@ -7,8 +7,47 @@ import { GameEngine } from '@/lib/game-engine';
 import { NetworkManager } from '@/lib/network-manager';
 import { GameState, Player, CellType } from '@/types/game';
 
+const playSound = (type: 'dice' | 'move' | 'message') => {
+  if (typeof window === 'undefined') return;
+  try {
+    const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContext) return;
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    if (type === 'dice') {
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(400, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(800, ctx.currentTime + 0.05);
+      gain.gain.setValueAtTime(0.5, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.05);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.05);
+    } else if (type === 'move') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(300, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(500, ctx.currentTime + 0.05);
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.05);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.05);
+    } else if (type === 'message') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(600, ctx.currentTime);
+      osc.frequency.setValueAtTime(800, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.2);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.2);
+    }
+  } catch (e) {}
+};
+
 // Custom Hook to manage dice animation
-function useFastDiceRoller(lastRoll: [number, number] | null | undefined, turnStatus?: string, onComplete?: () => void) {
+function useFastDiceRoller(lastRoll: [number, number] | null | undefined, turnStatus?: string, onComplete?: () => void, isSoundEnabledRef?: React.MutableRefObject<boolean>) {
   const [animatedRoll, setAnimatedRoll] = useState<[number, number]>([1, 1]);
 
   const latestOnComplete = useRef(onComplete);
@@ -23,6 +62,9 @@ function useFastDiceRoller(lastRoll: [number, number] | null | undefined, turnSt
     const maxIterations = 10;
     const interval = setInterval(() => {
       setAnimatedRoll([Math.floor(Math.random() * 6) + 1, Math.floor(Math.random() * 6) + 1]);
+      if (isSoundEnabledRef?.current) {
+         playSound('dice');
+      }
       iterations++;
       if (iterations >= maxIterations) {
         clearInterval(interval);
@@ -31,7 +73,7 @@ function useFastDiceRoller(lastRoll: [number, number] | null | undefined, turnSt
     }, 50);
 
     return () => clearInterval(interval);
-  }, [lastRoll, turnStatus]);
+  }, [lastRoll, turnStatus, isSoundEnabledRef]);
 
   const displayRoll = turnStatus === 'ROLLING' ? animatedRoll : (lastRoll || [1, 1]);
   return { displayRoll };
@@ -92,6 +134,23 @@ export default function GamePage() {
 
   const prevChatMessagesLength = useRef(0);
   const lastChatMsgId = useRef<string | null>(null);
+  const prevPositionsRef = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    if (!gameState) return;
+    const currentPositions: Record<string, number> = {};
+    let moved = false;
+    for (const player of gameState.players) {
+       currentPositions[player.id] = player.position;
+       if (prevPositionsRef.current[player.id] !== undefined && prevPositionsRef.current[player.id] !== player.position) {
+          moved = true;
+       }
+    }
+    if (moved && isSoundEnabledRef.current) {
+       playSound('move');
+    }
+    prevPositionsRef.current = currentPositions;
+  }, [gameState?.players]);
 
   useEffect(() => {
     if (chatScrollRef.current) {
@@ -101,12 +160,8 @@ export default function GamePage() {
     const messages = gameState?.chatMessages || [];
     if (messages.length > 0) {
       const lastMsg = messages[messages.length - 1];
-      if (lastMsg.id !== lastChatMsgId.current && lastMsg.senderId !== localPlayerId && isSoundEnabledRef.current) {
-         try {
-             const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3');
-             audio.volume = 0.4;
-             audio.play().catch(e => console.log('Audio play failed', e));
-         } catch(e){}
+      if (lastMsg.id !== lastChatMsgId.current && lastMsg.senderId !== localPlayerId && lastMsg.senderId !== 'system' && isSoundEnabledRef.current) {
+         playSound('message');
       }
       lastChatMsgId.current = lastMsg.id;
     }
@@ -1761,16 +1816,16 @@ export default function GamePage() {
                      </div>
                    </motion.div>
                  ) : (
-                   <div className="flex flex-col items-center justify-end w-full h-full pointer-events-none pb-8">
+                   <div className="flex flex-col items-center justify-end w-full h-full pointer-events-none pb-8 relative">
                      <AnimatePresence>
                        {gameState.lastRoll && (
                          <motion.div 
                            initial={{ opacity: 0, scale: 0.5, y: 20 }}
                            animate={{ opacity: 1, scale: 1, y: 0 }}
-                           className="flex gap-2 mb-2"
+                           className="absolute top-[30%] left-1/2 -translate-x-1/2 -translate-y-1/2 flex gap-2 z-50 shadow-2xl"
                          >
-                           <div className="w-10 h-10 bg-[#2C2C2E] rounded-xl flex items-center justify-center text-xl font-black text-[#3390EC] shadow-xl border border-white/5">{displayRoll[0]}</div>
-                           <div className="w-10 h-10 bg-[#2C2C2E] rounded-xl flex items-center justify-center text-xl font-black text-[#3390EC] shadow-xl border border-white/5">{displayRoll[1]}</div>
+                           <div className="w-12 h-12 bg-[#2C2C2E] rounded-xl flex items-center justify-center text-2xl font-black text-[#3390EC] shadow-[0_0_20px_rgba(51,144,236,0.3)] border border-white/10">{displayRoll[0]}</div>
+                           <div className="w-12 h-12 bg-[#2C2C2E] rounded-xl flex items-center justify-center text-2xl font-black text-[#3390EC] shadow-[0_0_20px_rgba(51,144,236,0.3)] border border-white/10">{displayRoll[1]}</div>
                          </motion.div>
                        )}
                      </AnimatePresence>

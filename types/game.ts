@@ -33,6 +33,7 @@ export interface Player {
   isBankrupt?: boolean;
   isBot?: boolean;
   botStrategy?: 'AGGRESSIVE' | 'ECONOMICAL';
+  missedTurns?: number;
 }
 
 export interface ChatMessage {
