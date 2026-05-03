@@ -51,6 +51,7 @@ service cloud.firestore {
               data.createdAt is int &&
               data.updatedAt is int &&
               (data.get('nickname', '') is string && data.get('nickname', '').size() <= 100) &&
+              (data.get('nicknameLower', '') is string && data.get('nicknameLower', '').size() <= 100) &&
               (data.get('avatarUrl', '') is string && data.get('avatarUrl', '').size() <= 1000);
     }
 
@@ -61,6 +62,24 @@ service cloud.firestore {
                data.addedAt is int &&
                (data.get('nickname', '') is string && data.get('nickname', '').size() <= 100) &&
                (data.get('avatarUrl', '') is string && data.get('avatarUrl', '').size() <= 1000);
+    }
+
+    function isValidFriendRequest(data) {
+        return data.keys().hasAll(['id', 'requesterId', 'status', 'createdAt']) &&
+               data.id is string && data.id.size() <= 128 &&
+               data.requesterId is string && data.requesterId.size() <= 128 &&
+               data.status == 'pending' &&
+               data.createdAt is int &&
+               (data.get('nickname', '') is string && data.get('nickname', '').size() <= 100) &&
+               (data.get('avatarUrl', '') is string && data.get('avatarUrl', '').size() <= 1000);
+    }
+
+    function isValidInvite(data) {
+        return data.keys().hasAll(['id', 'roomId', 'hostName', 'createdAt']) &&
+               data.id is string && data.id.size() <= 128 &&
+               data.roomId is string && data.roomId.size() <= 128 &&
+               data.hostName is string && data.hostName.size() <= 100 &&
+               data.createdAt is int;
     }
 
     match /users/{userId} {
@@ -82,11 +101,37 @@ service cloud.firestore {
       allow read: if isSignedIn() && request.auth.uid == userId;
       allow list: if isSignedIn() && request.auth.uid == userId;
       allow create: if isSignedIn() &&
-                    request.auth.uid == userId &&
                     isValidId(friendId) &&
                     isValidFriend(incoming()) &&
                     incoming().id == friendId &&
-                    incoming().friendId == friendId;
+                    incoming().friendId == friendId &&
+                    (
+                       (request.auth.uid == userId) || 
+                       (request.auth.uid == friendId && exists(/databases/$(database)/documents/users/$(request.auth.uid)/friendRequests/$(userId)))
+                    );
+      allow delete: if isSignedIn() && (request.auth.uid == userId || request.auth.uid == friendId);
+    }
+
+    match /users/{userId}/friendRequests/{requesterId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow list: if isSignedIn() && request.auth.uid == userId;
+      allow create: if isSignedIn() &&
+                    isValidId(requesterId) &&
+                    isValidFriendRequest(incoming()) &&
+                    incoming().id == requesterId &&
+                    incoming().requesterId == request.auth.uid &&
+                    userId != request.auth.uid;
+      allow delete: if isSignedIn() && (request.auth.uid == userId || request.auth.uid == requesterId);
+    }
+
+    match /users/{userId}/invites/{inviteId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow list: if isSignedIn() && request.auth.uid == userId;
+      allow create: if isSignedIn() &&
+                    isValidId(inviteId) &&
+                    isValidInvite(incoming()) &&
+                    incoming().id == inviteId &&
+                    exists(/databases/$(database)/documents/users/$(userId)/friends/$(request.auth.uid));
       allow delete: if isSignedIn() && request.auth.uid == userId;
     }
   }

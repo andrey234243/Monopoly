@@ -58,6 +58,14 @@
     "/users/{userId}/friends/{friendId}": {
       "schema": { "$ref": "Friend" },
       "description": "A user's friend"
+    },
+    "/users/{userId}/friendRequests/{requesterId}": {
+      "schema": { "$ref": "FriendRequest" },
+      "description": "Friend requests"
+    },
+    "/users/{userId}/invites/{inviteId}": {
+      "schema": { "$ref": "Invite" },
+      "description": "Game invites"
     }
   }
 }

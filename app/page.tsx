@@ -57,6 +57,7 @@ export default function GamePage() {
   const [profileTab, setProfileTab] = useState<'stats' | 'settings' | 'friends'>('stats');
   const [friendSearchText, setFriendSearchText] = useState('');
   const [friendsData, setFriendsData] = useState<any[]>([]);
+  const [friendRequestsData, setFriendRequestsData] = useState<any[]>([]);
   const [isSearchingFriend, setIsSearchingFriend] = useState(false);
   const [friendSearchResults, setFriendSearchResults] = useState<any[]>([]);
   const [roomSettings, setRoomSettings] = useState({
@@ -623,24 +624,29 @@ export default function GamePage() {
              try {
                 const { doc, getDoc, collection, getDocs } = await import('firebase/firestore');
                 const { db, auth } = await import('@/lib/firebase');
-                const { onAuthStateChanged } = await import('firebase/auth');
                 
-                onAuthStateChanged(auth, async (user) => {
-                  if (user) {
-                    const userRef = doc(db, 'users', user.uid);
-                    const userSnap = await getDoc(userRef);
-                    if (userSnap.exists()) {
-                       setUserProfile(userSnap.data() as any);
-                    } else {
-                       setUserProfile({ gamesPlayed: 0, wins: 0, totalWealthPeak: 0, totalRentsCollected: 0 });
-                    }
-
-                    // fetch friends
-                    const friendsRef = collection(db, 'users', user.uid, 'friends');
-                    const friendsSnap = await getDocs(friendsRef);
-                    setFriendsData(friendsSnap.docs.map(d => d.data()));
+                if (auth.currentUser) {
+                  const user = auth.currentUser;
+                  const userRef = doc(db, 'users', user.uid);
+                  const userSnap = await getDoc(userRef);
+                  if (userSnap.exists()) {
+                     setUserProfile(userSnap.data() as any);
+                  } else {
+                     setUserProfile({ gamesPlayed: 0, wins: 0, totalWealthPeak: 0, totalRentsCollected: 0 });
                   }
-                });
+
+                  // fetch friends
+                  const friendsRef = collection(db, 'users', user.uid, 'friends');
+                  const friendsSnap = await getDocs(friendsRef);
+                  setFriendsData(friendsSnap.docs.map(d => d.data()));
+                  
+                  // fetch requests
+                  const reqRef = collection(db, 'users', user.uid, 'friendRequests');
+                  const reqSnap = await getDocs(reqRef);
+                  setFriendRequestsData(reqSnap.docs.map(d => d.data()));
+                } else {
+                  setUserProfile({ gamesPlayed: 0, wins: 0, totalWealthPeak: 0, totalRentsCollected: 0 });
+                }
              } catch (e) {
                 console.error("Failed to load profile", e);
              }
@@ -785,13 +791,32 @@ export default function GamePage() {
     }
 
     try {
-      const { doc, setDoc } = await import('firebase/firestore');
+      const { doc, setDoc, getDoc } = await import('firebase/firestore');
       const { db, auth } = await import('@/lib/firebase');
       if (auth.currentUser) {
-         await setDoc(doc(db, 'users', auth.currentUser.uid), {
-             nickname: localPlayerName,
-             avatarUrl: localAvatar
-         }, { merge: true });
+         const userRef = doc(db, 'users', auth.currentUser.uid);
+         const snap = await getDoc(userRef);
+         if (snap.exists()) {
+             await setDoc(userRef, {
+                 nickname: localPlayerName,
+                 nicknameLower: localPlayerName.toLowerCase(),
+                 avatarUrl: localAvatar,
+                 updatedAt: +(new Date())
+             }, { merge: true });
+         } else {
+             await setDoc(userRef, {
+                 id: auth.currentUser.uid,
+                 nickname: localPlayerName,
+                 nicknameLower: localPlayerName.toLowerCase(),
+                 avatarUrl: localAvatar,
+                 gamesPlayed: 0,
+                 wins: 0,
+                 totalWealthPeak: 0,
+                 totalRentsCollected: 0,
+                 createdAt: +(new Date()),
+                 updatedAt: +(new Date())
+             });
+         }
       }
     } catch (e) {
       console.error('Failed to sync profile settings to firestore', e);
@@ -857,11 +882,11 @@ export default function GamePage() {
         // By nickname (prefix search)
         if (results.length === 0) {
            const usersRef = collection(db, 'users');
-           const searchText = friendSearchText.trim();
+           const searchText = friendSearchText.trim().toLowerCase();
            const q = query(
                usersRef, 
-               where('nickname', '>=', searchText),
-               where('nickname', '<=', searchText + '\uf8ff')
+               where('nicknameLower', '>=', searchText),
+               where('nicknameLower', '<=', searchText + '\uf8ff')
            );
            const querySnapshot = await getDocs(q);
            querySnapshot.forEach((doc) => {
@@ -879,29 +904,76 @@ export default function GamePage() {
      }
   };
 
-  const addFriend = async (friend: any) => {
+  const sendFriendRequest = async (friend: any) => {
      try {
          const { doc, setDoc } = await import('firebase/firestore');
          const { db, auth } = await import('@/lib/firebase');
          if (!auth.currentUser) return;
          
-         await setDoc(doc(db, 'users', auth.currentUser.uid, 'friends', friend.id), {
-             id: friend.id,
-             friendId: friend.id,
-             nickname: friend.nickname || 'Игрок',
-             avatarUrl: friend.avatarUrl || '',
-             addedAt: +(new Date())
+         await setDoc(doc(db, 'users', friend.id, 'friendRequests', auth.currentUser.uid), {
+             id: auth.currentUser.uid,
+             requesterId: auth.currentUser.uid,
+             nickname: localPlayerName,
+             avatarUrl: localAvatar,
+             status: 'pending',
+             createdAt: +(new Date())
          });
          
-         setFriendsData(prev => {
-            if (prev.find(p => p.id === friend.id)) return prev;
-            return [...prev, friend];
-         });
          setFriendSearchText('');
          setFriendSearchResults([]);
      } catch(e) {
-         console.error("Failed to add friend", e);
+         console.error("Failed to send friend request", e);
      }
+  };
+
+  const acceptFriendRequest = async (req: any) => {
+     try {
+         const { doc, setDoc, deleteDoc } = await import('firebase/firestore');
+         const { db, auth } = await import('@/lib/firebase');
+         if (!auth.currentUser) return;
+         
+         // 1. Add them to my friends list
+         await setDoc(doc(db, 'users', auth.currentUser.uid, 'friends', req.id), {
+             id: req.id,
+             friendId: req.id,
+             nickname: req.nickname || 'Игрок',
+             avatarUrl: req.avatarUrl || '',
+             addedAt: +(new Date())
+         });
+         
+         // 2. Add myself to their friends list
+         await setDoc(doc(db, 'users', req.id, 'friends', auth.currentUser.uid), {
+             id: auth.currentUser.uid,
+             friendId: auth.currentUser.uid,
+             nickname: localPlayerName,
+             avatarUrl: localAvatar,
+             addedAt: +(new Date())
+         });
+
+         // 3. Delete the request
+         await deleteDoc(doc(db, 'users', auth.currentUser.uid, 'friendRequests', req.id));
+
+         setFriendsData(prev => [...prev, {
+             id: req.id,
+             nickname: req.nickname,
+             avatarUrl: req.avatarUrl
+         }]);
+         setFriendRequestsData(prev => prev.filter(r => r.id !== req.id));
+
+     } catch(e) {
+         console.error("Failed to accept request", e);
+     }
+  };
+
+  const inviteToGame = (friend: any) => {
+      // For TMA:
+      try {
+         const roomIdToShare = peerId || roomId;
+         const txt = encodeURIComponent('Го играть в Магнат!');
+         const urlExt = encodeURIComponent(`https://t.me/ais_magnat_bot/app?startapp=${roomIdToShare}`);
+         const url = `https://t.me/share/url?url=${urlExt}&text=${txt}`;
+         window.open(url, '_blank');
+      } catch(e) { console.error(e); }
   };
 
   if (isProfileOpen) {
@@ -984,9 +1056,30 @@ export default function GamePage() {
                             <span className="text-[10px] text-gray-500 font-mono truncate">{res.id}</span>
                          </div>
                       </div>
-                      <button onClick={() => addFriend(res)} className="text-[#3390EC] font-bold text-xs bg-[#3390EC]/10 px-2 py-1 rounded">Добавить</button>
+                      <button onClick={() => sendFriendRequest(res)} className="text-[#3390EC] font-bold text-xs bg-[#3390EC]/10 px-2 py-1 rounded">Добавить</button>
                     </div>
                   ))}
+                </div>
+              )}
+
+              {friendRequestsData.length > 0 && (
+                <div className="bg-[#1C1C1D] rounded-xl p-2 space-y-2">
+                   <p className="text-xs text-yellow-500 font-bold uppercase tracking-wider px-2 pt-1 border-b border-white/5 pb-1">Заявки ({friendRequestsData.length})</p>
+                   <div className="space-y-2 max-h-[150px] overflow-y-auto no-scrollbar">
+                     {friendRequestsData.map(req => (
+                        <div key={req.id} className="flex items-center justify-between p-2 rounded-lg bg-[#2C2C2E] border border-white/5">
+                           <div className="flex items-center gap-2 overflow-hidden shrink-0 max-w-[60%]">
+                              <div className="w-8 h-8 rounded-full overflow-hidden bg-gray-700 shrink-0 border border-white/10">
+                                 {req.avatarUrl ? <img src={req.avatarUrl} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center font-bold text-lg">{req.nickname?.charAt(0) || '?'}</div>}
+                              </div>
+                              <div className="flex flex-col truncate">
+                                 <span className="font-bold text-sm truncate">{req.nickname || 'Unknown'}</span>
+                              </div>
+                           </div>
+                           <button onClick={() => acceptFriendRequest(req)} className="text-green-500 font-bold text-xs bg-green-500/10 px-2 py-1 rounded">Принять</button>
+                        </div>
+                     ))}
+                   </div>
                 </div>
               )}
 
@@ -997,14 +1090,18 @@ export default function GamePage() {
                  ) : (
                     <div className="space-y-2 max-h-[200px] overflow-y-auto no-scrollbar">
                       {friendsData.map(friend => (
-                        <div key={friend.id} className="flex items-center gap-3 p-2 rounded-lg bg-[#2C2C2E] border border-white/5">
-                           <div className="w-10 h-10 rounded-full overflow-hidden bg-gray-700 shrink-0 border border-white/10">
-                              {friend.avatarUrl ? <img src={friend.avatarUrl} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center font-bold text-lg">{friend.nickname?.charAt(0) || '?'}</div>}
+                        <div key={friend.id} className="flex items-center justify-between p-2 rounded-lg bg-[#2C2C2E] border border-white/5">
+                           <div className="flex items-center gap-3 shrink-0 max-w-[60%]">
+                             <div className="w-10 h-10 rounded-full overflow-hidden bg-gray-700 shrink-0 border border-white/10">
+                                {friend.avatarUrl ? <img src={friend.avatarUrl} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center font-bold text-lg">{friend.nickname?.charAt(0) || '?'}</div>}
+                             </div>
+                             <div className="flex flex-col truncate">
+                                <span className="font-bold text-sm truncate">{friend.nickname || 'Unknown'}</span>
+                             </div>
                            </div>
-                           <div className="flex flex-col truncate">
-                              <span className="font-bold text-sm truncate">{friend.nickname || 'Unknown'}</span>
-                              <span className="text-[10px] text-gray-500 font-mono truncate">{friend.id}</span>
-                           </div>
+                           {(peerId || roomId) && gameState?.isStarted === false && (
+                              <button onClick={() => inviteToGame(friend)} className="text-[#3390EC] font-bold text-xs bg-[#3390EC]/10 px-2 py-1 rounded">В игру</button>
+                           )}
                         </div>
                       ))}
                     </div>
