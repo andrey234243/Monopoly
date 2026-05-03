@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import Image from 'next/image';
 import { motion, AnimatePresence } from 'motion/react';
 import { BOARD_CELLS } from '@/lib/board-data';
 import { GameEngine } from '@/lib/game-engine';
@@ -1482,16 +1481,17 @@ export default function GamePage() {
     );
   }
 
-  const [logoErrors, setLogoErrors] = useState<Record<number, boolean>>({});
-
   // --- HTML DOM BOARD CALCULATION ---
   // Enhance cells from gameState with static data from BOARD_CELLS (like logoUrl, description)
   // This ensures that even if a game state is stale, we still display current asset metadata.
   const cellsToDraw = useMemo(() => {
     if (!gameState) return BOARD_CELLS;
     return gameState.cells.map((cell, idx) => ({
-      ...BOARD_CELLS[idx], // Static reference data
-      ...cell,             // Dynamic game state (owner, upgrades, etc.)
+      ...cell,
+      logoUrl: BOARD_CELLS[idx]?.logoUrl,
+      description: BOARD_CELLS[idx]?.description || cell.description,
+      name: BOARD_CELLS[idx]?.name || cell.name,
+      color: BOARD_CELLS[idx]?.color || cell.color,
     }));
   }, [gameState]);
   const isLocalTurn = gameState?.currentPlayerId === localPlayerId;
@@ -2045,15 +2045,11 @@ export default function GamePage() {
                                          {/* Soft Glow */}
                                          <div className="absolute inset-0 opacity-[0.15] blur-md" style={{ backgroundColor: cell.color || '#3390EC' }} />
                                          
-                                         {cell.logoUrl && !logoErrors[cell.id] ? (
-                                           <Image 
+                                         {cell.logoUrl ? (
+                                           <img 
                                              src={cell.logoUrl} 
                                              alt={cell.name} 
-                                             fill
-                                             sizes="(max-width: 768px) 40px, 64px"
-                                             className="object-contain p-1 drop-shadow-md z-10" 
-                                             referrerPolicy="no-referrer"
-                                             onError={() => setLogoErrors(prev => ({ ...prev, [cell.id]: true }))}
+                                             className="absolute inset-0 w-full h-full object-contain p-1 drop-shadow-md z-10" 
                                            />
                                          ) : (
                                            <span className="text-[10px] sm:text-base md:text-xl font-black uppercase drop-shadow-sm z-10" 
@@ -2945,18 +2941,15 @@ export default function GamePage() {
                   <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
                 </button>
                 <div className="text-right flex items-center justify-end gap-3 max-w-[70%]">
-                  {cellsToDraw[zoomedCell].logoUrl && !logoErrors[cellsToDraw[zoomedCell].id] && (
-                    <div className="w-12 h-12 shrink-0 rounded-lg bg-white border border-gray-200 shadow flex items-center justify-center p-1 relative overflow-hidden">
-                      <Image 
-                        src={cellsToDraw[zoomedCell].logoUrl} 
-                        alt={cellsToDraw[zoomedCell].name} 
-                        fill
-                        className="object-contain p-1" 
-                        referrerPolicy="no-referrer"
-                        onError={() => setLogoErrors(prev => ({ ...prev, [cellsToDraw[zoomedCell].id]: true }))}
-                      />
-                    </div>
-                  )}
+                                  {cellsToDraw[zoomedCell].logoUrl && (
+                                    <div className="w-12 h-12 shrink-0 rounded-lg bg-white border border-gray-200 shadow flex items-center justify-center p-1 relative overflow-hidden">
+                                      <img 
+                                        src={cellsToDraw[zoomedCell].logoUrl} 
+                                        alt={cellsToDraw[zoomedCell].name} 
+                                        className="w-full h-full object-contain p-1" 
+                                      />
+                                    </div>
+                                  )}
                   <h2 className="text-3xl font-black italic tracking-tighter uppercase whitespace-pre-line leading-none">
                     {cellsToDraw[zoomedCell].name}
                   </h2>
