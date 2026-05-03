@@ -15,6 +15,7 @@ export interface Cell {
   color?: string;
   ownerId?: string | null;
   description?: string;
+  logoUrl?: string;
   upgradeLevel?: number; // 0: None, 1: Traffic, 2: Premium Servers
   isMortgaged?: boolean;
   mortgageTurnsLeft?: number;

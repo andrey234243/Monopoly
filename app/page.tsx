@@ -1926,9 +1926,9 @@ export default function GamePage() {
               return (
                 <motion.div 
                   key={index} 
-                  className={`absolute border border-[#2C2C2E] bg-[#1C1C1D] flex items-center justify-center overflow-hidden cursor-pointer group`}
+                  className={`absolute border border-gray-300 bg-[#F5F5F7] flex items-center justify-center overflow-hidden cursor-pointer group shadow-sm`}
                   style={style}
-                  whileHover={!isCorner ? { scale: 1.05, zIndex: 30, boxShadow: "0 12px 30px -10px rgba(0,0,0,0.5)" } : {}}
+                  whileHover={!isCorner ? { scale: 1.05, zIndex: 30, boxShadow: "0 12px 30px -10px rgba(0,0,0,0.3)" } : {}}
                   whileTap={{ scale: 0.98 }}
                   onClick={() => setZoomedCell(index)}
                 >
@@ -2029,28 +2029,33 @@ export default function GamePage() {
                               <div className={`flex-1 flex w-full h-full items-center justify-center ${isBottom ? 'flex-col' : isTop ? 'flex-col-reverse' : isLeft ? 'flex-row-reverse' : 'flex-row'}`}>
                                   {/* Logo Area */}
                                   <div className="flex-1 flex items-center justify-center w-full h-full">
-                                     <div className="w-8 h-8 sm:w-10 sm:h-10 md:w-12 md:h-12 rounded-lg flex items-center justify-center bg-black/20 border border-white/5 relative overflow-hidden group-hover:scale-110 transition-transform" 
-                                          style={{ boxShadow: cell.color ? `inset 0 0 15px ${cell.color}20` : undefined }}>
+                                     <div className="w-8 h-8 sm:w-10 sm:h-10 md:w-12 md:h-12 rounded-lg flex items-center justify-center bg-white border border-gray-200 relative overflow-hidden group-hover:scale-110 transition-transform shadow-sm" 
+                                          style={{ boxShadow: cell.color ? `inset 0 0 10px ${cell.color}15` : undefined }}>
                                          {/* Soft Glow */}
-                                         <div className="absolute inset-0 opacity-10 blur-sm" style={{ backgroundColor: cell.color || '#3390EC' }} />
-                                         <span className="text-sm sm:text-base md:text-xl font-black uppercase drop-shadow-[0_2px_8px_rgba(0,0,0,0.8)] z-10" 
-                                               style={{ color: cell.color || '#e5e5ea' }}>
-                                             {cell.name.charAt(0)}
-                                         </span>
+                                         <div className="absolute inset-0 opacity-[0.15] blur-md" style={{ backgroundColor: cell.color || '#3390EC' }} />
+                                         
+                                         {cell.logoUrl ? (
+                                           <img src={cell.logoUrl} alt={cell.name} className="w-[85%] h-[85%] object-contain drop-shadow-md z-10" />
+                                         ) : (
+                                           <span className="text-sm sm:text-base md:text-xl font-black uppercase drop-shadow-sm z-10" 
+                                                 style={{ color: cell.color || '#333' }}>
+                                               {cell.name.charAt(0)}
+                                           </span>
+                                         )}
                                      </div>
                                   </div>
                                   
                                   {/* Price Area */}
                                   {cell.price && (
-                                    <div className={`flex items-center justify-center opacity-60 ${isTop || isBottom ? 'w-full pb-0.5' : 'h-full px-0.5'}`}>
+                                    <div className={`flex items-center justify-center opacity-80 ${isTop || isBottom ? 'w-full pb-0.5' : 'h-full px-0.5'}`}>
                                        {(isLeft || isRight) ? (
                                          <div className="flex flex-col items-center justify-center h-full">
                                            {`$${cell.price}`.split('').map((char, charIdx) => (
-                                             <span key={charIdx} className="text-[7px] sm:text-[9px] font-bold text-gray-400 leading-[1]">{char}</span>
+                                             <span key={charIdx} className="text-[7px] sm:text-[9px] font-bold text-gray-600 leading-[1]">{char}</span>
                                            ))}
                                          </div>
                                        ) : (
-                                         <span className="text-[7px] sm:text-[9px] font-bold text-gray-400 tracking-tighter">${cell.price}</span>
+                                         <span className="text-[7px] sm:text-[9px] font-bold text-gray-600 tracking-tighter">${cell.price}</span>
                                        )}
                                     </div>
                                   )}
@@ -2920,7 +2925,12 @@ export default function GamePage() {
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
                 </button>
-                <div className="text-right">
+                <div className="text-right flex items-center justify-end gap-3 max-w-[70%]">
+                  {cellsToDraw[zoomedCell].logoUrl && (
+                    <div className="w-12 h-12 shrink-0 rounded-lg bg-white border border-gray-200 shadow flex items-center justify-center p-1">
+                      <img src={cellsToDraw[zoomedCell].logoUrl} alt={cellsToDraw[zoomedCell].name} className="w-full h-full object-contain" />
+                    </div>
+                  )}
                   <h2 className="text-3xl font-black italic tracking-tighter uppercase whitespace-pre-line leading-none">
                     {cellsToDraw[zoomedCell].name}
                   </h2>
