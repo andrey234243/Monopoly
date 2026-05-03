@@ -50,6 +50,7 @@ export default function GamePage() {
   const [localPlayerName, setLocalPlayerName] = useState<string>('');
   const [localColor, setLocalColor] = useState<string>('#3390EC');
   const [recentRooms, setRecentRooms] = useState<{id: string, name: string}[]>([]);
+  const [recentMatches, setRecentMatches] = useState<any[]>([]);
   const [publicRooms, setPublicRooms] = useState<{id: string, name: string, hostName: string, playerCount: number, maxPlayers: number, isStarted: boolean}[]>([]);
   const [isSoundEnabled, setIsSoundEnabled] = useState(true);
   const [localAvatar, setLocalAvatar] = useState<string>('https://api.dicebear.com/7.x/pixel-art/svg?seed=Felix');
@@ -79,9 +80,7 @@ export default function GamePage() {
   const [viewingPlayerProfileData, setViewingPlayerProfileData] = useState<any | null>(null);
   const [userProfile, setUserProfile] = useState<{ gamesPlayed: number, wins: number, totalWealthPeak: number, totalRentsCollected: number } | null>(null);
   const [hasSavedProfileStats, setHasSavedProfileStats] = useState(false);
-  const [tradeSetup, setTradeSetup] = useState<{ cellId: number } | null>(null);
-  const [tradePrice, setTradePrice] = useState<string>('150');
-  const [tradeTarget, setTradeTarget] = useState<string>('');
+  const [advancedTradeSetup, setAdvancedTradeSetup] = useState<{ active: boolean, targetId: string, offerCells: number[], requestCells: number[], offerMoney: string, requestMoney: string } | null>(null);
 
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
@@ -206,7 +205,21 @@ export default function GamePage() {
       }
     };
 
+    const fetchMatches = async () => {
+       try {
+           const { collection, query, orderBy, limit, getDocs } = await import('firebase/firestore');
+           const { db } = await import('@/lib/firebase');
+           const q = query(collection(db, 'matches'), orderBy('createdAt', 'desc'), limit(20));
+           const snap = await getDocs(q);
+           const mDates = snap.docs.map(d => d.data());
+           setRecentMatches(mDates);
+       } catch (e) {
+           console.error('Failed to fetch matches', e);
+       }
+    };
+
     fetchRooms();
+    fetchMatches();
     const interval = setInterval(fetchRooms, 10000);
     return () => clearInterval(interval);
   }, [isJoined]);
@@ -418,27 +431,36 @@ export default function GamePage() {
           const targetId = gameState.pendingTrade.toId;
           const target = gameState.players.find(p => p.id === targetId);
           if (target?.isBot) {
-             const tradeId = gameState.pendingTrade.id || `${gameState.pendingTrade.fromId}_${gameState.pendingTrade.cellId}_${gameState.pendingTrade.price}`;
+             const tradeId = gameState.pendingTrade.id || Math.random().toString();
              if ((window as any).lastProcessedTrade !== tradeId) {
                 (window as any).lastProcessedTrade = tradeId;
                 setTimeout(() => {
                    const s = engine.getState();
                    if (!s.pendingTrade) return;
-                   const cell = s.cells[s.pendingTrade.cellId];
-                   const price = s.pendingTrade.price;
                    
-                   const colorSet = s.cells.filter(c => c.type === CellType.ASSET && c.color === cell.color);
-                   const ownedByBot = colorSet.filter(c => c.ownerId === targetId).length;
-                   const isDesperate = ownedByBot === colorSet.length - 1;
+                   const trade = s.pendingTrade;
+                   let botEvaluation = 0;
                    
-                   const maxPrice = (cell.price || 100) * (isDesperate ? 3 : 1.5);
+                   // Add value for what bot gets
+                   trade.offerCellIds.forEach((id: number) => {
+                       const cell = s.cells[id];
+                       botEvaluation += (cell.price || 100) * 1.5;
+                   });
+                   botEvaluation += trade.offerMoney;
                    
-                   if (target.balance >= price && price <= maxPrice) {
+                   // Subtract value for what bot gives
+                   trade.requestCellIds.forEach((id: number) => {
+                       const cell = s.cells[id];
+                       botEvaluation -= (cell.price || 100) * 1.5;
+                   });
+                   botEvaluation -= trade.requestMoney;
+                   
+                   if (target.balance >= trade.requestMoney && botEvaluation >= 0) {
                       engine.acceptTrade();
-                      engine.addChatMessage('system', 'Бот', `${target.name} принял предложение.`);
+                      engine.addChatMessage('system', 'Бот', `${target.name} принял предложение об обмене.`);
                    } else {
                       engine.rejectTrade();
-                      engine.addChatMessage('system', 'Бот', `${target.name} отклонил предложение.`);
+                      engine.addChatMessage('system', 'Бот', `${target.name} отклонил предложение об обмене.`);
                    }
                 }, 2000);
              }
@@ -570,6 +592,33 @@ export default function GamePage() {
                    createdAt: currentProfile.createdAt || +(new Date()),
                    updatedAt: +(new Date())
                 }, { merge: true });
+
+                const isHost = gameState.players.find(p => p.id === localPlayerId)?.isHost;
+                if (isHost && peerId) {
+                   const matchRef = doc(db, 'matches', peerId);
+                   let maxCap = 0;
+                   const pls = gameState.players.map(pl => {
+                      const plWealth = pl.balance + gameState.cells.filter(c => c.ownerId === pl.id).reduce((sum, c) => sum + (c.price || 0), 0);
+                      if (plWealth > maxCap) maxCap = plWealth;
+                      return {
+                         id: pl.id,
+                         name: pl.name,
+                         color: pl.color,
+                         wealth: plWealth
+                      };
+                   });
+                   const winner = gameState.players.find(pl => pl.id === gameState.winnerId);
+                   await setDoc(matchRef, {
+                      id: peerId,
+                      roomName: gameState.roomName || 'Без названия',
+                      winnerName: winner ? winner.name : 'Неизвестно',
+                      winnerId: gameState.winnerId || '',
+                      players: pls,
+                      durationStr: `${gameState.version} ходов`,
+                      maxCapital: maxCap,
+                      createdAt: +(new Date())
+                   });
+                }
              } catch (e) {
                 console.error("Failed to save profile stats", e);
              }
@@ -663,10 +712,10 @@ export default function GamePage() {
     // Fetch viewed player profile
     useEffect(() => {
        if (viewingPlayerProfileId) {
-          setViewingPlayerProfileData(null);
           const fetchViewedProfile = async () => {
              try {
                 const { doc, getDoc } = await import('firebase/firestore');
+                setViewingPlayerProfileData(null);
                 const { db } = await import('@/lib/firebase');
                 
                 const userRef = doc(db, 'users', viewingPlayerProfileId);
@@ -682,7 +731,7 @@ export default function GamePage() {
           };
           fetchViewedProfile();
        } else {
-          setViewingPlayerProfileData(null);
+          setTimeout(() => setViewingPlayerProfileData(null), 0);
        }
     }, [viewingPlayerProfileId]);
 
@@ -1000,7 +1049,7 @@ export default function GamePage() {
       // For TMA:
       try {
          const roomIdToShare = peerId || roomId;
-         const txt = encodeURIComponent('Го играть в Магнат!');
+         const txt = encodeURIComponent('Ваш друг приглашает вас сыграть в Магнат!');
          const urlExt = encodeURIComponent(`https://t.me/ais_magnat_bot/app?startapp=${roomIdToShare}`);
          const url = `https://t.me/share/url?url=${urlExt}&text=${txt}`;
          window.open(url, '_blank');
@@ -1486,20 +1535,30 @@ export default function GamePage() {
                   </button>
                 </div>
 
-                {recentRooms.length > 0 && (
-                  <div className="space-y-3">
-                    <p className="text-[10px] text-gray-500 uppercase font-black text-center tracking-widest">Недавние комнаты</p>
+                {recentMatches.length > 0 && (
+                  <div className="space-y-3 mt-8 max-h-[400px] overflow-y-auto no-scrollbar">
+                    <p className="text-[10px] text-gray-500 uppercase font-black text-center tracking-widest sticky top-0 bg-[#1C1C1D] py-2 z-10">Истории матчей</p>
                     <div className="flex flex-col gap-2">
-                      {recentRooms.map(room => (
-                        <button 
-                          key={room.id}
-                          onClick={() => joinRoom(room.id)}
-                          className="w-full bg-[#2C2C2E]/50 border border-white/5 p-3 rounded-xl flex items-center justify-between text-xs font-bold hover:bg-[#2C2C2E] transition-colors"
-                        >
-                          <span className="text-gray-300">{room.name}</span>
-                          <span className="text-[#3390EC] font-mono">{room.id.slice(0, 6)}...</span>
-                        </button>
-                      ))}
+                       {recentMatches.map(match => (
+                           <div key={match.id} className="w-full bg-[#2C2C2E]/50 border border-white/5 p-4 rounded-xl space-y-3">
+                               <div className="flex justify-between items-center pb-2 border-b border-white/5">
+                                   <span className="text-[#3390EC] font-bold text-xs uppercase tracking-widest">{match.roomName}</span>
+                                   <span className="text-gray-500 text-[10px] uppercase font-bold">{new Date(match.createdAt).toLocaleDateString()}</span>
+                               </div>
+                               <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                     <span className="text-yellow-500 text-lg">🏆</span>
+                                     <span className="text-white font-black text-sm">{match.winnerName}</span>
+                                  </div>
+                                  <span className="text-[#34C759] font-bold">${match.maxCapital}</span>
+                               </div>
+                               <div className="flex flex-wrap gap-1">
+                                  {match.players?.map((p: any) => (
+                                     <div key={p.id} className="w-4 h-4 rounded-full" style={{ backgroundColor: p.color }} title={p.name} />
+                                  ))}
+                               </div>
+                           </div>
+                       ))}
                     </div>
                   </div>
                 )}
@@ -1702,7 +1761,7 @@ export default function GamePage() {
                      </div>
                    </motion.div>
                  ) : (
-                   <>
+                   <div className="flex flex-col items-center justify-end w-full h-full pointer-events-none pb-8">
                      <AnimatePresence>
                        {gameState.lastRoll && (
                          <motion.div 
@@ -1715,26 +1774,46 @@ export default function GamePage() {
                          </motion.div>
                        )}
                      </AnimatePresence>
-                     <h1 className="text-2xl font-black text-[#3390EC] opacity-30 tracking-widest mb-4">МАГНАТ</h1>
-                     <div className="flex flex-col items-center gap-2 w-full overflow-hidden">
-                       {gameState.chatMessages.slice(-5).map((msg, i) => (
-                         <motion.div 
-                           initial={{ opacity: 0, scale: 0.9, y: 10 }} 
-                           animate={{ opacity: 1, scale: 1, y: 0 }} 
-                           key={msg.id} 
-                           className="text-center w-full"
-                           style={{ opacity: 1 - (4 - i) * 0.2 }}
-                         >
-                           <span className="text-[10px] font-bold block" style={{ color: gameState.players.find(p => p.id === msg.senderId)?.color }}>{msg.senderName}</span>
-                           <span className="text-[11px] text-gray-300 leading-tight block">{msg.text}</span>
-                         </motion.div>
-                       ))}
+                     <div className="hidden">МАГНАТ</div>
+                     <div className="flex flex-col justify-end gap-2 w-full h-[180px] pointer-events-none pb-4">
+                       {gameState.chatMessages.slice(-5).map((msg, i, arr) => {
+                         const isSystem = msg.senderId === 'system';
+                         const isMe = msg.senderId === localPlayerId;
+                         const sender = gameState.players.find(p => p.id === msg.senderId);
+                         const bgColor = isSystem ? 'rgba(44, 44, 46, 0.8)' : (isMe ? '#3390EC' : (sender?.color || '#3390EC'));
+                         const textColor = isSystem ? '#9CA3AF' : '#FFFFFF';
+                         const align = isSystem ? 'center' : (isMe ? 'flex-end' : 'flex-start');
+                         const borderRadius = isSystem 
+                             ? 'rounded-2xl' 
+                             : (isMe ? 'rounded-2xl rounded-br-sm' : 'rounded-2xl rounded-bl-sm');
+                         
+                         return (
+                           <motion.div 
+                             layout
+                             initial={{ opacity: 0, scale: 0.8, y: 20 }} 
+                             animate={{ opacity: 1, scale: 1, y: 0 }} 
+                             key={msg.id} 
+                             className="flex flex-col w-full px-4 shrink-0 transition-opacity"
+                             style={{ opacity: 1 - (arr.length - 1 - i) * 0.15, alignItems: align }}
+                           >
+                             {!isSystem && !isMe && (
+                               <span className="text-[10px] font-bold mb-1 ml-1" style={{ color: sender?.color }}>{msg.senderName}</span>
+                             )}
+                             <div 
+                               className={`px-3 py-1.5 max-w-[85%] shadow-lg backdrop-blur-md ${borderRadius}`}
+                               style={{ backgroundColor: bgColor, color: textColor }}
+                             >
+                               <span className="text-[11px] leading-tight font-medium inline-block">{msg.text}</span>
+                             </div>
+                           </motion.div>
+                         );
+                       })}
                      </div>
-                   </>
+                   </div>
                  )}
                </div>
              ) : (
-               <h1 className="text-3xl font-black text-[#555] opacity-20 tracking-tighter">МАГНАТ</h1>
+               <div className="hidden">МАГНАТ</div>
              )}
         </div>
 
@@ -2281,14 +2360,35 @@ export default function GamePage() {
                   <div className="absolute -top-12 left-1/2 -translate-x-1/2 w-24 h-24 bg-[#34C759] rounded-3xl shadow-[0_0_30px_#34C759] flex items-center justify-center -rotate-12">
                      <span className="text-4xl text-white font-black">🤝</span>
                   </div>
-                  <h3 className="text-center font-black text-2xl text-white mt-10 mb-2">ПРЕДЛОЖЕНИЕ</h3>
+                  <h3 className="text-center font-black text-2xl text-white mt-10 mb-2">ПРЕДЛОЖЕНИЕ ОБМЕНА</h3>
                   <p className="text-center text-gray-400 text-sm mb-6">
-                     <span className="text-white font-bold">{gameState.players.find(p => p.id === gameState.pendingTrade!.fromId)?.name}</span> предлагает вам купить <span className="text-[#3390EC] font-bold">{gameState.cells[gameState.pendingTrade.cellId].name}</span>
+                     <span className="text-white font-bold">{gameState.players.find(p => p.id === gameState.pendingTrade!.fromId)?.name}</span> предлагает сделку
                   </p>
                   
-                  <div className="bg-[#1C1C1D] rounded-2xl p-4 flex flex-col items-center mb-8 border border-gray-700">
-                     <span className="text-gray-500 font-bold uppercase tracking-widest text-[10px] mb-1">Они просят</span>
-                     <span className="font-black text-3xl text-[#34C759]">${gameState.pendingTrade.price}</span>
+                  <div className="space-y-4 mb-8">
+                      <div className="bg-[#1C1C1D] rounded-2xl p-4 border border-gray-700 text-left">
+                         <span className="text-[#34C759] font-bold uppercase tracking-widest text-[10px] mb-2 block">Вы получите</span>
+                         {gameState.pendingTrade.offerMoney > 0 && <div className="text-white font-bold text-sm mb-1">+ ${gameState.pendingTrade.offerMoney} доплаты</div>}
+                         {gameState.pendingTrade.offerCellIds.length > 0 && gameState.pendingTrade.offerCellIds.map((id: number) => (
+                             <div key={id} className="text-white text-sm font-bold flex items-center gap-2">
+                                 <div className="w-2 h-2 rounded-full" style={{ backgroundColor: gameState.cells[id].color }} />
+                                 {gameState.cells[id].name}
+                             </div>
+                         ))}
+                         {gameState.pendingTrade.offerMoney === 0 && gameState.pendingTrade.offerCellIds.length === 0 && <span className="text-gray-500 text-sm">Ничего</span>}
+                      </div>
+
+                      <div className="bg-[#1C1C1D] rounded-2xl p-4 border border-gray-700 text-left">
+                         <span className="text-[#FF3B30] font-bold uppercase tracking-widest text-[10px] mb-2 block">Вы отдадите</span>
+                         {gameState.pendingTrade.requestMoney > 0 && <div className="text-white font-bold text-sm mb-1">- ${gameState.pendingTrade.requestMoney} доплаты</div>}
+                         {gameState.pendingTrade.requestCellIds.length > 0 && gameState.pendingTrade.requestCellIds.map((id: number) => (
+                             <div key={id} className="text-white text-sm font-bold flex items-center gap-2">
+                                 <div className="w-2 h-2 rounded-full" style={{ backgroundColor: gameState.cells[id].color }} />
+                                 {gameState.cells[id].name}
+                             </div>
+                         ))}
+                         {gameState.pendingTrade.requestMoney === 0 && gameState.pendingTrade.requestCellIds.length === 0 && <span className="text-gray-500 text-sm">Ничего</span>}
+                      </div>
                   </div>
 
                   <div className="flex gap-3">
@@ -2303,10 +2403,10 @@ export default function GamePage() {
                      <button 
                        onClick={() => {
                           const player = gameState.players.find(p => p.id === localPlayerId);
-                          if (player && player.balance >= gameState.pendingTrade!.price) {
+                          if (player && player.balance >= gameState.pendingTrade!.requestMoney) {
                              engineRef.current?.acceptTrade();
                           } else {
-                             alert("Недостаточно средств!");
+                             alert("Недостаточно средств для доплаты!");
                           }
                        }}
                        className="flex-[2] h-14 bg-[#34C759] text-white rounded-2xl font-black uppercase shadow-lg shadow-[#34C759]/20 active:scale-95 transition-transform"
@@ -2321,70 +2421,118 @@ export default function GamePage() {
 
       {/* TRADE SETUP MODAL */}
       <AnimatePresence>
-        {tradeSetup && gameState && (
+        {advancedTradeSetup && gameState && (
           <motion.div 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto"
           >
             <motion.div 
               initial={{ scale: 0.9, y: 20 }}
               animate={{ scale: 1, y: 0 }}
               exit={{ scale: 0.9, y: 20 }}
-              className="bg-[#2C2C2E] w-full max-w-sm rounded-[32px] p-6 shadow-2xl space-y-6"
+              className="bg-[#2C2C2E] w-full max-w-2xl rounded-[32px] p-6 shadow-2xl space-y-6"
             >
               <div className="text-center">
-                <h3 className="text-2xl font-black text-white uppercase tracking-widest">Продажа</h3>
-                <p className="text-gray-400 font-medium text-sm mt-1">{gameState.cells[tradeSetup.cellId].name}</p>
+                <h3 className="text-2xl font-black text-white uppercase tracking-widest">Обмен Активами</h3>
               </div>
-
-              <div className="space-y-4">
-                 <div>
-                    <label className="text-xs text-gray-400 uppercase font-bold tracking-widest pl-2 mb-2 block">Покупатель</label>
-                    <select 
-                       value={tradeTarget}
-                       onChange={(e) => setTradeTarget(e.target.value)}
-                       className="w-full bg-[#1C1C1D] text-white rounded-2xl p-4 font-bold outline-none border-2 border-transparent focus:border-[#3390EC]/30 h-14"
-                    >
-                       <option value="">Выберите игрока...</option>
-                       {gameState.players.filter(p => p.id !== localPlayerId && !p.isBankrupt).map(p => (
-                          <option key={p.id} value={p.id}>{p.name}</option>
-                       ))}
-                    </select>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                 <div className="bg-[#1C1C1D] rounded-2xl p-4">
+                    <h4 className="text-[#34C759] font-bold mb-3 uppercase text-xs tracking-widest">Вы предлагаете</h4>
+                    <div className="space-y-3">
+                        <div>
+                            <label className="text-gray-400 text-xs block mb-1">Доплата ($)</label>
+                            <input type="number" className="w-full bg-[#2C2C2E] text-white rounded-xl p-3 font-bold outline-none" value={advancedTradeSetup.offerMoney} onChange={e => setAdvancedTradeSetup({...advancedTradeSetup, offerMoney: e.target.value})} />
+                        </div>
+                        <div>
+                            <label className="text-gray-400 text-xs block mb-1">Ваши активы</label>
+                            <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
+                                {gameState.cells.filter(c => c.ownerId === localPlayerId).map(cell => (
+                                    <label key={cell.id} className="flex items-center gap-2 p-2 rounded-lg bg-[#2C2C2E] cursor-pointer">
+                                        <input type="checkbox" checked={advancedTradeSetup.offerCells.includes(cell.id)} onChange={(e) => {
+                                            const newCells = e.target.checked 
+                                                ? [...advancedTradeSetup.offerCells, cell.id] 
+                                                : advancedTradeSetup.offerCells.filter(id => id !== cell.id);
+                                            setAdvancedTradeSetup({...advancedTradeSetup, offerCells: newCells});
+                                        }} className="accent-[#34C759]" />
+                                        <span className="text-white text-sm truncate flex-1">{cell.name}</span>
+                                        <div className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: cell.color }} />
+                                    </label>
+                                ))}
+                                {gameState.cells.filter(c => c.ownerId === localPlayerId).length === 0 && <div className="text-gray-500 text-sm">Нет активов</div>}
+                            </div>
+                        </div>
+                    </div>
                  </div>
-                 <div>
-                    <label className="text-xs text-gray-400 uppercase font-bold tracking-widest pl-2 mb-2 block">Цена ($)</label>
-                    <input 
-                       type="number"
-                       value={tradePrice}
-                       onChange={(e) => setTradePrice(e.target.value)}
-                       className="w-full bg-[#1C1C1D] text-[#34C759] rounded-2xl p-4 font-black text-2xl outline-none border-2 border-transparent focus:border-[#3390EC]/30 h-14 text-center"
-                    />
+                 
+                 <div className="bg-[#1C1C1D] rounded-2xl p-4">
+                    <h4 className="text-[#3390EC] font-bold mb-3 uppercase text-xs tracking-widest">Вы просите</h4>
+                    <div className="space-y-3">
+                        <div>
+                            <label className="text-gray-400 text-xs block mb-1">Игрок</label>
+                            <select className="w-full bg-[#2C2C2E] text-white rounded-xl p-3 font-bold outline-none mb-3" value={advancedTradeSetup.targetId} onChange={e => setAdvancedTradeSetup({...advancedTradeSetup, targetId: e.target.value, requestCells: []})}>
+                                <option value="">Выберите игрока...</option>
+                                {gameState.players.filter(p => p.id !== localPlayerId && !p.isBankrupt).map(p => (
+                                    <option key={p.id} value={p.id}>{p.name}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="text-gray-400 text-xs block mb-1">Они доплачивают ($)</label>
+                            <input type="number" className="w-full bg-[#2C2C2E] text-white rounded-xl p-3 font-bold outline-none" value={advancedTradeSetup.requestMoney} onChange={e => setAdvancedTradeSetup({...advancedTradeSetup, requestMoney: e.target.value})} disabled={!advancedTradeSetup.targetId} />
+                        </div>
+                        <div>
+                            <label className="text-gray-400 text-xs block mb-1">Их активы</label>
+                            <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
+                                {advancedTradeSetup.targetId ? gameState.cells.filter(c => c.ownerId === advancedTradeSetup.targetId).map(cell => (
+                                    <label key={cell.id} className="flex items-center gap-2 p-2 rounded-lg bg-[#2C2C2E] cursor-pointer">
+                                        <input type="checkbox" checked={advancedTradeSetup.requestCells.includes(cell.id)} onChange={(e) => {
+                                            const newCells = e.target.checked 
+                                                ? [...advancedTradeSetup.requestCells, cell.id] 
+                                                : advancedTradeSetup.requestCells.filter(id => id !== cell.id);
+                                            setAdvancedTradeSetup({...advancedTradeSetup, requestCells: newCells});
+                                        }} className="accent-[#3390EC]" />
+                                        <span className="text-white text-sm truncate flex-1">{cell.name}</span>
+                                        <div className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: cell.color }} />
+                                    </label>
+                                )) : <div className="text-gray-500 text-sm">Сначала выберите игрока</div>}
+                                {advancedTradeSetup.targetId && gameState.cells.filter(c => c.ownerId === advancedTradeSetup.targetId).length === 0 && <div className="text-gray-500 text-sm">Нет активов</div>}
+                            </div>
+                        </div>
+                    </div>
                  </div>
               </div>
 
               <div className="flex gap-3 pt-4">
                  <button 
-                   onClick={() => setTradeSetup(null)}
+                   onClick={() => setAdvancedTradeSetup(null)}
                    className="flex-1 h-14 bg-gray-800 text-white rounded-2xl font-bold uppercase active:scale-[0.98] transition-transform"
                  >
                    Отмена
                  </button>
                  <button 
                    onClick={() => {
-                      if (!tradeTarget) {
-                         alert("Выберите покупателя");
+                      if (!advancedTradeSetup.targetId) {
+                         alert("Выберите игрока");
                          return;
                       }
-                      const priceNum = parseInt(tradePrice);
-                      if (isNaN(priceNum) || priceNum < 0) return;
+                      const offerNum = parseInt(advancedTradeSetup.offerMoney) || 0;
+                      const reqNum = parseInt(advancedTradeSetup.requestMoney) || 0;
+                      if (offerNum < 0 || reqNum < 0) return;
                       
-                      engineRef.current?.proposeTrade(tradeSetup.cellId, tradeTarget, priceNum);
-                      setTradeSetup(null);
+                      engineRef.current?.proposeAdvancedTrade(
+                          advancedTradeSetup.targetId,
+                          offerNum,
+                          reqNum,
+                          advancedTradeSetup.offerCells,
+                          advancedTradeSetup.requestCells
+                      );
+                      setAdvancedTradeSetup(null);
                       setZoomedCell(null);
                    }}
-                   className={`flex-[2] h-14 rounded-2xl font-black uppercase transition-all shadow-lg ${tradeTarget ? 'bg-[#3390EC] text-white shadow-[#3390EC]/20 active:scale-[0.98]' : 'bg-gray-700 text-gray-500 cursor-not-allowed'}`}
+                   className={`flex-[2] h-14 rounded-2xl font-black uppercase transition-all shadow-lg ${advancedTradeSetup.targetId ? 'bg-[#3390EC] text-white shadow-[#3390EC]/20 active:scale-[0.98]' : 'bg-gray-700 text-gray-500 cursor-not-allowed'}`}
                  >
                    Предложить
                  </button>
@@ -2757,6 +2905,20 @@ export default function GamePage() {
                  </div>
               )}
 
+              {cellsToDraw[zoomedCell].type === 'ASSET' && cellsToDraw[zoomedCell].ownerId && cellsToDraw[zoomedCell].ownerId !== localPlayerId && !cellsToDraw[zoomedCell].isMortgaged && (
+                 <div className="mb-6 mt-4">
+                     <button 
+                       onClick={() => {
+                           setZoomedCell(null);
+                           setAdvancedTradeSetup({ active: true, targetId: cellsToDraw[zoomedCell].ownerId!, offerCells: [], requestCells: [zoomedCell!], offerMoney: '0', requestMoney: '0' });
+                       }}
+                       className="w-full h-12 rounded-xl font-bold text-xs uppercase bg-[#3390EC]/10 text-[#3390EC] border-2 border-[#3390EC]/30 active:scale-[0.98] transition-transform"
+                     >
+                       Предложить обмен
+                     </button>
+                 </div>
+              )}
+
               {/* Upgrade Logic */}
               {cellsToDraw[zoomedCell].type === 'ASSET' && cellsToDraw[zoomedCell].ownerId === localPlayerId && (
                 <div className="mb-6 space-y-4">
@@ -2817,10 +2979,13 @@ export default function GamePage() {
                              Заложить (+${Math.floor((cellsToDraw[zoomedCell].price || 0) * 0.5)})
                            </button>
                            <button 
-                             onClick={() => setTradeSetup({ cellId: zoomedCell! })}
+                             onClick={() => {
+                                 setZoomedCell(null);
+                                 setAdvancedTradeSetup({ active: true, targetId: '', offerCells: [zoomedCell!], requestCells: [], offerMoney: '0', requestMoney: '0' });
+                             }}
                              className="flex-1 h-12 rounded-xl font-bold text-xs uppercase bg-[#34C759]/10 text-[#34C759] border-2 border-[#34C759]/30 active:scale-[0.98] transition-transform"
                            >
-                             Предложить
+                             Предложить обмен
                            </button>
                         </div>
                      ) : (

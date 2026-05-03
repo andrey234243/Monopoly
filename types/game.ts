@@ -93,10 +93,12 @@ export interface GameState {
   };
   pendingTrade?: {
     id?: string;
-    cellId: number;
     fromId: string;
     toId: string;
-    price: number;
+    offerMoney: number;
+    requestMoney: number;
+    offerCellIds: number[];
+    requestCellIds: number[];
   };
   stats: {
     richestOnTurn10: string | null;

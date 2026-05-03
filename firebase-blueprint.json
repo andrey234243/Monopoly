@@ -44,9 +44,29 @@
         "addedAt": { "type": "number" }
       },
       "required": ["id", "friendId", "addedAt"]
+    },
+    "Match": {
+      "title": "Match",
+      "description": "A completed game match history",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "roomName": { "type": "string" },
+        "winnerName": { "type": "string" },
+        "winnerId": { "type": "string" },
+        "players": { "type": "array" },
+        "durationStr": { "type": "string" },
+        "maxCapital": { "type": "number" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "roomName", "winnerId", "createdAt"]
     }
   },
   "firestore": {
+    "/matches/{matchId}": {
+      "schema": { "$ref": "Match" },
+      "description": "Global match history"
+    },
     "/rooms/{roomId}": {
       "schema": { "$ref": "Room" },
       "description": "Game rooms active in the system"

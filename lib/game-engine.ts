@@ -642,18 +642,23 @@ export class GameEngine {
     this.notifyStateChange(prevState);
   }
 
-  public proposeTrade(cellId: number, toPlayerId: string, price: number): void {
-     const cell = this.state.cells[cellId];
-     if (cell.ownerId !== this.state.currentPlayerId) return; // Only current player can initiate trade during their turn or maybe anytime?
-     // Actually, let anyone initiate if it's their asset. Let's just check owner.
+  public proposeAdvancedTrade(
+    toPlayerId: string,
+    offerMoney: number,
+    requestMoney: number,
+    offerCellIds: number[],
+    requestCellIds: number[]
+  ): void {
      const prevState = JSON.parse(JSON.stringify(this.state));
      
      this.state.pendingTrade = {
         id: Math.random().toString(36).substring(7),
-        cellId,
-        fromId: cell.ownerId,
+        fromId: this.state.currentPlayerId,
         toId: toPlayerId,
-        price
+        offerMoney,
+        requestMoney,
+        offerCellIds,
+        requestCellIds
      };
 
      this.notifyStateChange(prevState);
@@ -666,15 +671,29 @@ export class GameEngine {
 
      const fromPlayer = this.state.players.find(p => p.id === trade.fromId);
      const toPlayer = this.state.players.find(p => p.id === trade.toId);
-     const cell = this.state.cells[trade.cellId];
 
-     if (fromPlayer && toPlayer && cell && cell.ownerId === fromPlayer.id) {
-        if (toPlayer.balance >= trade.price) {
-           this.setBalance(toPlayer, toPlayer.balance - trade.price);
-           this.setBalance(fromPlayer, fromPlayer.balance + trade.price);
-           cell.ownerId = toPlayer.id;
-           cell.color = toPlayer.color;
-           this.addChatMessage('system', 'Сделка', `${toPlayer.name} купил ${cell.name} у ${fromPlayer.name} за $${trade.price}`);
+     if (fromPlayer && toPlayer) {
+        if (toPlayer.balance >= trade.requestMoney && fromPlayer.balance >= trade.offerMoney) {
+           this.setBalance(toPlayer, toPlayer.balance - trade.requestMoney + trade.offerMoney);
+           this.setBalance(fromPlayer, fromPlayer.balance - trade.offerMoney + trade.requestMoney);
+
+           for (const cellId of trade.offerCellIds) {
+               const cell = this.state.cells[cellId];
+               if (cell.ownerId === fromPlayer.id) {
+                   cell.ownerId = toPlayer.id;
+                   cell.color = toPlayer.color;
+               }
+           }
+
+           for (const cellId of trade.requestCellIds) {
+               const cell = this.state.cells[cellId];
+               if (cell.ownerId === toPlayer.id) {
+                   cell.ownerId = fromPlayer.id;
+                   cell.color = fromPlayer.color;
+               }
+           }
+
+           this.addChatMessage('system', 'Сделка', `${toPlayer.name} и ${fromPlayer.name} совершили обмен активами.`);
         }
      }
 
@@ -687,7 +706,7 @@ export class GameEngine {
      const prevState = JSON.parse(JSON.stringify(this.state));
      const toPlayer = this.state.players.find(p => p.id === this.state.pendingTrade!.toId);
      if (toPlayer) {
-         this.addChatMessage('system', 'Сделка', `${toPlayer.name} отклонил предложение о покупке.`);
+         this.addChatMessage('system', 'Сделка', `${toPlayer.name} отклонил предложение об обмене.`);
      }
      this.state.pendingTrade = undefined;
      this.notifyStateChange(prevState);

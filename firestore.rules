@@ -124,6 +124,19 @@ service cloud.firestore {
       allow delete: if isSignedIn() && (request.auth.uid == userId || request.auth.uid == requesterId);
     }
 
+    function isValidMatch(data) {
+       return data.keys().hasAll(['id', 'roomName', 'winnerName', 'winnerId', 'players', 'durationStr', 'maxCapital', 'createdAt']) &&
+              data.keys().size() <= 8 &&
+              data.id is string && data.id.size() <= 128 &&
+              data.roomName is string && data.roomName.size() <= 100 &&
+              data.winnerName is string && data.winnerName.size() <= 64 &&
+              data.winnerId is string && data.winnerId.size() <= 128 &&
+              data.players is list && data.players.size() <= 10 &&
+              data.durationStr is string && data.durationStr.size() <= 32 &&
+              data.maxCapital is number &&
+              data.createdAt is int;
+    }
+
     match /users/{userId}/invites/{inviteId} {
       allow read: if isSignedIn() && request.auth.uid == userId;
       allow list: if isSignedIn() && request.auth.uid == userId;
@@ -133,6 +146,16 @@ service cloud.firestore {
                     incoming().id == inviteId &&
                     exists(/databases/$(database)/documents/users/$(userId)/friends/$(request.auth.uid));
       allow delete: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    match /matches/{matchId} {
+      allow read: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isSignedIn() && 
+                    isValidId(matchId) && 
+                    isValidMatch(incoming()) && 
+                    incoming().id == matchId;
+      allow update, delete: if false;
     }
   }
 }
