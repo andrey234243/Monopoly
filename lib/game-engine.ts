@@ -34,6 +34,7 @@ export class GameEngine {
     this.state.roomPassword = settings.roomPassword;
     this.state.maxPlayers = settings.maxPlayers;
     this.state.initialBalance = settings.initialBalance;
+    this.setTurnStatus('WAITING_ROLL');
     
     // Apply balance to players
     this.state.players.forEach(p => {
@@ -106,7 +107,7 @@ export class GameEngine {
          // This is tricky if surrender happens during move animation. 
          // But let's assume it's safe.
       }
-      this.state.turnStatus = 'END_TURN';
+      this.setTurnStatus('END_TURN');
       this.notifyStateChange(prevState);
       this.nextTurn();
     } else {
@@ -135,6 +136,39 @@ export class GameEngine {
     this.onStateChange({ ...this.state }, prevState);
   }
 
+  private setTurnStatus(status: GameState['turnStatus']) {
+    this.state.turnStatus = status;
+    if (['WAITING_ROLL', 'ACTION_REQUIRED', 'AUCTION', 'END_TURN'].includes(status)) {
+      this.state.turnStartedAt = Date.now();
+    } else {
+      this.state.turnStartedAt = undefined;
+    }
+  }
+
+  public handleTimeout(): void {
+    if (!this.state.turnStartedAt) return;
+    
+    const status = this.state.turnStatus;
+    if (status === 'WAITING_ROLL') {
+      this.rollDice();
+    } else if (status === 'ACTION_REQUIRED') {
+      this.skipBuy();
+    } else if (status === 'AUCTION') {
+      const auction = this.state.activeAuction;
+      if (auction) {
+        const currentPlayerId = auction.bidders[auction.turnIndex];
+        this.auctionPass(currentPlayerId);
+      }
+    } else if (status === 'END_TURN') {
+      const player = this.state.players.find(p => p.id === this.state.currentPlayerId);
+      if (player && player.balance < 0) {
+        this.surrender(player.id);
+      } else {
+        this.nextTurn();
+      }
+    }
+  }
+
   public rollDice(): void {
     if (this.state.turnStatus !== 'WAITING_ROLL') return;
     if (!this.canPerformAction()) return;
@@ -145,7 +179,7 @@ export class GameEngine {
     const d2 = Math.floor(Math.random() * 6) + 1;
     this.state.lastRoll = [d1, d2];
     this.state.currentAction = undefined;
-    this.state.turnStatus = 'ROLLING'; // Stop here and wait for animation to finish
+    this.setTurnStatus('ROLLING'); // Stop here and wait for animation to finish
     this.notifyStateChange(prevState);
   }
 
@@ -164,7 +198,7 @@ export class GameEngine {
         player.jailTurns = 0;
         this.state.consecutiveDoubles = 0;
         this.addChatMessage('system', 'Система', `${player.name} выбрался из Теневого Бана (дубль!)`);
-        this.state.turnStatus = 'MOVING';
+        this.setTurnStatus('MOVING');
         this.notifyStateChange(prevState);
         this.movePlayer(d1 + d2);
       } else {
@@ -174,12 +208,12 @@ export class GameEngine {
           player.inJail = false;
           player.jailTurns = 0;
           this.addChatMessage('system', 'Система', `${player.name} заплатил $50 и вышел из бана.`);
-          this.state.turnStatus = 'MOVING';
+          this.setTurnStatus('MOVING');
           this.notifyStateChange(prevState);
           this.movePlayer(d1 + d2);
         } else {
           this.addChatMessage('system', 'Система', `${player.name} остается в Теневом Бане.`);
-          this.state.turnStatus = 'END_TURN';
+          this.setTurnStatus('END_TURN');
           this.notifyStateChange(prevState);
         }
       }
@@ -191,7 +225,7 @@ export class GameEngine {
           player.position = 10;
           player.inJail = true;
           player.jailTurns = 0;
-          this.state.turnStatus = 'END_TURN';
+          this.setTurnStatus('END_TURN');
           this.state.currentAction = { type: 'SPECIAL', cellId: 30, message: 'Три дубля подряд! Вы отправлены в Теневой Бан.' };
           this.addChatMessage('system', 'Система', `${player.name} отправлен в Теневой Бан за три дубля!`);
           this.notifyStateChange(prevState);
@@ -201,7 +235,7 @@ export class GameEngine {
       } else {
         this.state.consecutiveDoubles = 0;
       }
-      this.state.turnStatus = 'MOVING';
+      this.setTurnStatus('MOVING');
       this.notifyStateChange(prevState);
       this.movePlayer(d1 + d2);
     }
@@ -290,7 +324,7 @@ export class GameEngine {
     const chance = pool[Math.floor(Math.random() * pool.length)];
     chance.effect();
 
-    this.state.turnStatus = 'END_TURN';
+    this.setTurnStatus('END_TURN');
     this.state.currentAction = { 
       type: 'CHANCE', 
       cellId: player.position, 
@@ -308,11 +342,11 @@ export class GameEngine {
     if (cell.type === CellType.ASSET) {
       if (!cell.ownerId) {
         // Option to buy
-        this.state.turnStatus = 'ACTION_REQUIRED';
+        this.setTurnStatus('ACTION_REQUIRED');
         this.state.currentAction = { type: 'BUY', cellId: cell.id, amount: cell.price };
       } else if (cell.ownerId !== player.id) {
         if (cell.isMortgaged) {
-           this.state.turnStatus = 'END_TURN';
+           this.setTurnStatus('END_TURN');
            this.addChatMessage('system', 'Система', `${player.name} попадает на заложенную собственность ${cell.name}. Аренда не взимается.`);
            this.notifyStateChange(prevState);
            return;
@@ -340,16 +374,16 @@ export class GameEngine {
           this.addChatMessage('system', 'Система', `${player.name} платит $${rentAmount} аренды ${this.state.players[ownerIndex].name}`);
         }
         
-        this.state.turnStatus = 'END_TURN';
+        this.setTurnStatus('END_TURN');
         this.state.currentAction = { type: 'RENT', cellId: cell.id, amount: rentAmount };
         this.state.stats.cellRents[cell.id] = (this.state.stats.cellRents[cell.id] || 0) + rentAmount;
       } else {
-        this.state.turnStatus = 'END_TURN';
+        this.setTurnStatus('END_TURN');
       }
     } else if (cell.type === CellType.TAX) {
       const tax = cell.id === 4 ? 200 : 150; // Platform Fee vs Scam
       this.setBalance(player, player.balance - tax);
-      this.state.turnStatus = 'END_TURN';
+      this.setTurnStatus('END_TURN');
       this.state.currentAction = { type: 'TAX', cellId: cell.id, amount: tax };
       this.addChatMessage('system', 'Система', `${player.name} платит налог $${tax}`);
     } else if (cell.id === 30) {
@@ -357,14 +391,14 @@ export class GameEngine {
       player.position = 10;
       player.inJail = true;
       player.jailTurns = 0;
-      this.state.turnStatus = 'END_TURN';
+      this.setTurnStatus('END_TURN');
       this.state.currentAction = { type: 'SPECIAL', cellId: cell.id, message: 'Вы отправлены в Теневой Бан!' };
       this.addChatMessage('system', 'Система', `${player.name} отправлен в Теневой Бан!`);
     } else if (cell.type === CellType.CHANCE) {
       this.handleChance(playerIndex);
       return; // handleChance handles its own state change
     } else {
-      this.state.turnStatus = 'END_TURN';
+      this.setTurnStatus('END_TURN');
     }
 
     this.notifyStateChange(prevState);
@@ -388,7 +422,7 @@ export class GameEngine {
         cellId: cellIndex,
         timestamp: Date.now()
       };
-      this.state.turnStatus = 'END_TURN';
+      this.setTurnStatus('END_TURN');
       this.state.currentAction = undefined;
       this.notifyStateChange(prevState);
     }
@@ -409,7 +443,7 @@ export class GameEngine {
       bidders: activePlayers,
       turnIndex: 0
     };
-    this.state.turnStatus = 'AUCTION';
+    this.setTurnStatus('AUCTION');
     this.state.currentAction = undefined;
     this.addChatMessage('system', 'Аукцион', `Аукцион за ${this.state.cells[cellId].name} начинается!`);
     
@@ -431,7 +465,12 @@ export class GameEngine {
        auction.currentBid = bidAmount;
        this.addChatMessage('system', 'Аукцион', `${player.name} ставит $${bidAmount}`);
        
-       auction.turnIndex = (auction.turnIndex + 1) % auction.bidders.length;
+       if (auction.bidders.length === 1) {
+           this.resolveAuction(playerId);
+       } else {
+           auction.turnIndex = (auction.turnIndex + 1) % auction.bidders.length;
+           this.state.turnStartedAt = Date.now(); // Reset timer for next bidder
+       }
        this.notifyStateChange(prevState);
     }
   }
@@ -457,13 +496,14 @@ export class GameEngine {
         this.resolveAuction(winnerId);
     } else if (auction.bidders.length === 0) {
         // Nobody wanted it
-        this.state.turnStatus = 'END_TURN';
+        this.setTurnStatus('END_TURN');
         this.state.activeAuction = undefined;
         this.addChatMessage('system', 'Аукцион', `Никто не купил поле.`);
     } else {
         if (auction.turnIndex >= auction.bidders.length) {
            auction.turnIndex = 0;
         }
+        this.state.turnStartedAt = Date.now(); // Reset timer for next bidder
     }
     
     this.notifyStateChange(prevState);
@@ -489,7 +529,7 @@ export class GameEngine {
        this.addChatMessage('system', 'Аукцион', `${winner.name} купил ${cell.name} за $${auction.currentBid}`);
     }
 
-    this.state.turnStatus = 'END_TURN';
+    this.setTurnStatus('END_TURN');
     this.state.activeAuction = undefined;
   }
 
@@ -596,7 +636,7 @@ export class GameEngine {
     // Check if game over
     this.checkGameOver();
     if ((this.state.turnStatus as string) !== 'GAME_OVER') {
-        this.state.turnStatus = 'END_TURN';
+        this.setTurnStatus('END_TURN');
     }
     
     this.notifyStateChange(prevState);
@@ -609,6 +649,7 @@ export class GameEngine {
      const prevState = JSON.parse(JSON.stringify(this.state));
      
      this.state.pendingTrade = {
+        id: Math.random().toString(36).substring(7),
         cellId,
         fromId: cell.ownerId,
         toId: toPlayerId,
@@ -688,7 +729,7 @@ export class GameEngine {
       text,
       timestamp: Date.now()
     };
-    this.state.chatMessages = [...this.state.chatMessages.slice(-20), newMessage]; 
+    this.state.chatMessages = [...this.state.chatMessages.slice(-100), newMessage]; 
     this.notifyStateChange(prevState);
   }
 
@@ -749,7 +790,7 @@ export class GameEngine {
     const player = this.state.players.find(p => p.id === this.state.currentPlayerId);
 
     if (isDouble && player && !player.inJail && !player.isBankrupt) {
-      this.state.turnStatus = 'WAITING_ROLL';
+      this.setTurnStatus('WAITING_ROLL');
       // keep currentPlayerId
     } else {
       this.state.consecutiveDoubles = 0;
@@ -763,7 +804,7 @@ export class GameEngine {
       }
       
       this.state.currentPlayerId = this.state.players[nextIndex].id;
-      this.state.turnStatus = 'WAITING_ROLL';
+      this.setTurnStatus('WAITING_ROLL');
       
       if (nextIndex <= currentIndex) {
           this.state.roundNumber = (this.state.roundNumber || 1) + 1;

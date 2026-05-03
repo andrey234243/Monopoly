@@ -29,17 +29,14 @@ service cloud.firestore {
                     isValidId(roomId) &&
                     isValidRoom(incoming()) &&
                     incoming().id == roomId &&
-                    incoming().hostId == request.auth.uid &&
-                    incoming().createdAt == request.time.toMillis() &&
-                    incoming().updatedAt == request.time.toMillis();
+                    incoming().hostId == request.auth.uid;
                     
       allow update: if isSignedIn() &&
                     isValidId(roomId) &&
                     isValidRoom(incoming()) &&
                     incoming().id == existing().id &&
                     incoming().hostId == existing().hostId &&
-                    incoming().createdAt == existing().createdAt &&
-                    incoming().updatedAt == request.time.toMillis();
+                    incoming().createdAt == existing().createdAt;
                     // Let any connected player update the gamestate during their turn
                     // or during trading, so we allow any signed-in user to update the state as long as it conforms to the schema.
                     // This is slightly more permissive but required for P2P-like shared state updates.
@@ -60,16 +57,13 @@ service cloud.firestore {
       allow create: if isSignedIn() &&
                     isValidId(userId) &&
                     isValidUserProfile(incoming()) &&
-                    incoming().id == request.auth.uid &&
-                    incoming().createdAt == request.time.toMillis() &&
-                    incoming().updatedAt == request.time.toMillis();
+                    incoming().id == request.auth.uid;
       allow update: if isSignedIn() &&
                     isValidId(userId) &&
                     isValidUserProfile(incoming()) &&
                     incoming().id == existing().id &&
                     incoming().id == request.auth.uid &&
-                    incoming().createdAt == existing().createdAt &&
-                    incoming().updatedAt == request.time.toMillis();
+                    incoming().createdAt == existing().createdAt;
     }
   }
 }

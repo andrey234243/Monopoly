@@ -56,6 +56,7 @@ export interface GameState {
   currentPlayerId: string;
   lastRoll: [number, number] | null;
   turnStatus: 'WAITING_ROLL' | 'ROLLING' | 'MOVING' | 'ACTION_REQUIRED' | 'AUCTION' | 'END_TURN' | 'GAME_OVER';
+  turnStartedAt?: number;
   cells: Cell[];
   activeAuction?: {
     cellId: number;
@@ -91,6 +92,7 @@ export interface GameState {
     requestCells: number[];
   };
   pendingTrade?: {
+    id?: string;
     cellId: number;
     fromId: string;
     toId: string;

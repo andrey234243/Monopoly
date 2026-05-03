@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { BOARD_CELLS } from '@/lib/board-data';
 import { GameEngine } from '@/lib/game-engine';
 import { NetworkManager } from '@/lib/network-manager';
-import { GameState, Player } from '@/types/game';
+import { GameState, Player, CellType } from '@/types/game';
 
 // Custom Hook to manage dice animation
 function useFastDiceRoller(lastRoll: [number, number] | null | undefined, turnStatus?: string, onComplete?: () => void) {
@@ -53,7 +53,8 @@ export default function GamePage() {
   const [publicRooms, setPublicRooms] = useState<{id: string, name: string, hostName: string, playerCount: number, maxPlayers: number, isStarted: boolean}[]>([]);
   const [isSoundEnabled, setIsSoundEnabled] = useState(true);
   const [localAvatar, setLocalAvatar] = useState<string>('https://api.dicebear.com/7.x/pixel-art/svg?seed=Felix');
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [profileTab, setProfileTab] = useState<'stats' | 'settings'>('stats');
   const [roomSettings, setRoomSettings] = useState({
     roomName: 'Офис Магната',
     maxPlayers: 4,
@@ -69,7 +70,6 @@ export default function GamePage() {
   const [chatInput, setChatInput] = useState('');
   const [isCloudRestoreOpen, setIsCloudRestoreOpen] = useState(false);
   const [cloudRestoreId, setCloudRestoreId] = useState('');
-  const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [userProfile, setUserProfile] = useState<{ gamesPlayed: number, wins: number, totalWealthPeak: number, totalRentsCollected: number } | null>(null);
   const [hasSavedProfileStats, setHasSavedProfileStats] = useState(false);
   const [tradeSetup, setTradeSetup] = useState<{ cellId: number } | null>(null);
@@ -85,23 +85,26 @@ export default function GamePage() {
   }, [isSoundEnabled]);
 
   const prevChatMessagesLength = useRef(0);
+  const lastChatMsgId = useRef<string | null>(null);
 
   useEffect(() => {
     if (chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
-    const currentLength = gameState?.chatMessages?.length || 0;
-    if (currentLength > prevChatMessagesLength.current) {
-      const lastMsg = gameState!.chatMessages[currentLength - 1];
-      if (lastMsg.senderId !== localPlayerId && isSoundEnabledRef.current) {
+    
+    const messages = gameState?.chatMessages || [];
+    if (messages.length > 0) {
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg.id !== lastChatMsgId.current && lastMsg.senderId !== localPlayerId && isSoundEnabledRef.current) {
          try {
              const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3');
              audio.volume = 0.4;
              audio.play().catch(e => console.log('Audio play failed', e));
          } catch(e){}
       }
+      lastChatMsgId.current = lastMsg.id;
     }
-    prevChatMessagesLength.current = currentLength;
+    prevChatMessagesLength.current = messages.length;
   }, [gameState?.chatMessages, localPlayerId]);
 
   useEffect(() => {
@@ -118,7 +121,19 @@ export default function GamePage() {
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    const initProfile = () => {
+    const initProfile = async () => {
+        let tmaName = '';
+        let tmaAvatar = '';
+        
+        try {
+           const WebApp = (await import('@twa-dev/sdk')).default;
+           if (WebApp.initDataUnsafe?.user) {
+              const u = WebApp.initDataUnsafe.user;
+              tmaName = u.first_name || u.username || '';
+              if (u.photo_url) tmaAvatar = u.photo_url;
+           }
+        } catch(e){}
+
         let localId = localStorage.getItem('tycoon_id');
         if (!localId) {
           localId = Math.random().toString(36).substring(7);
@@ -127,13 +142,13 @@ export default function GamePage() {
         setLocalPlayerId(localId!);
 
         const savedName = localStorage.getItem('tycoon_name');
-        setLocalPlayerName(savedName || `Игрок`);
+        setLocalPlayerName(savedName || tmaName || `Игрок`);
 
         const savedColor = localStorage.getItem('tycoon_color');
         setLocalColor(savedColor || '#3390EC');
 
         const savedAvatar = localStorage.getItem('tycoon_avatar');
-        setLocalAvatar(savedAvatar || `https://api.dicebear.com/7.x/pixel-art/svg?seed=${localId}`);
+        setLocalAvatar(savedAvatar || tmaAvatar || `https://api.dicebear.com/7.x/pixel-art/svg?seed=${localId}`);
 
         const savedRooms = localStorage.getItem('tycoon_recent_rooms');
         if (savedRooms) setRecentRooms(JSON.parse(savedRooms));
@@ -213,6 +228,14 @@ export default function GamePage() {
         WebApp.expand();
         WebApp.headerColor = '#1C1C1D';
         WebApp.backgroundColor = '#1C1C1D';
+        
+        try {
+          const { signInAnonymously } = await import('firebase/auth');
+          const { auth } = await import('@/lib/firebase');
+          await signInAnonymously(auth);
+        } catch (e) {
+          console.error('Firebase Auth Error:', e);
+        }
       } catch (e) {
         console.error('Failed to init TMA SDK', e);
       }
@@ -360,8 +383,41 @@ export default function GamePage() {
        const isHost = gameState.players.find(p => p.id === localPlayerId)?.isHost;
        if (!isHost) return;
 
-       const tStatus = gameState.turnStatus;
        const engine = engineRef.current;
+
+       // BOT TRADE RESPONSE logic
+       if (gameState.pendingTrade) {
+          const targetId = gameState.pendingTrade.toId;
+          const target = gameState.players.find(p => p.id === targetId);
+          if (target?.isBot) {
+             const tradeId = gameState.pendingTrade.id || `${gameState.pendingTrade.fromId}_${gameState.pendingTrade.cellId}_${gameState.pendingTrade.price}`;
+             if ((window as any).lastProcessedTrade !== tradeId) {
+                (window as any).lastProcessedTrade = tradeId;
+                setTimeout(() => {
+                   const s = engine.getState();
+                   if (!s.pendingTrade) return;
+                   const cell = s.cells[s.pendingTrade.cellId];
+                   const price = s.pendingTrade.price;
+                   
+                   const colorSet = s.cells.filter(c => c.type === CellType.ASSET && c.color === cell.color);
+                   const ownedByBot = colorSet.filter(c => c.ownerId === targetId).length;
+                   const isDesperate = ownedByBot === colorSet.length - 1;
+                   
+                   const maxPrice = (cell.price || 100) * (isDesperate ? 3 : 1.5);
+                   
+                   if (target.balance >= price && price <= maxPrice) {
+                      engine.acceptTrade();
+                      engine.addChatMessage('system', 'Бот', `${target.name} принял предложение.`);
+                   } else {
+                      engine.rejectTrade();
+                      engine.addChatMessage('system', 'Бот', `${target.name} отклонил предложение.`);
+                   }
+                }, 2000);
+             }
+          }
+       }
+
+       const tStatus = gameState.turnStatus;
        
        if (tStatus === 'AUCTION') {
           const auc = gameState.activeAuction;
@@ -369,10 +425,18 @@ export default function GamePage() {
           const bidderId = auc.bidders[auc.turnIndex];
           const bidder = gameState.players.find(p => p.id === bidderId);
           if (bidder?.isBot) {
+             const aucKey = `auc_${auc.cellId}_${auc.currentBid}_${auc.turnIndex}_${gameState.version}`;
+             if ((window as any).lastAucKey === aucKey) return;
+             (window as any).lastAucKey = aucKey;
+
              setTimeout(() => {
-                const cell = gameState.cells[auc.cellId];
-                if (bidder.balance > auc.currentBid + 50 && (auc.currentBid < (cell.price || 0) * (bidder.botStrategy === 'AGGRESSIVE' ? 1.5 : 0.8))) {
-                   engine.auctionBid(bidder.id, auc.currentBid + 10);
+                const s = engine.getState();
+                const currentAuc = s.activeAuction;
+                if (!currentAuc || currentAuc.bidders[currentAuc.turnIndex] !== bidderId) return;
+
+                const cell = s.cells[currentAuc.cellId];
+                if (bidder.balance > currentAuc.currentBid + 50 && (currentAuc.currentBid < (cell.price || 0) * (bidder.botStrategy === 'AGGRESSIVE' ? 1.5 : 0.8))) {
+                   engine.auctionBid(bidder.id, currentAuc.currentBid + 10);
                 } else {
                    engine.auctionPass(bidder.id);
                 }
@@ -383,11 +447,23 @@ export default function GamePage() {
 
        const player = gameState.players.find(p => p.id === gameState.currentPlayerId);
        if (player?.isBot) {
+          const actionKey = `bot_${player.id}_${tStatus}_${gameState.currentAction?.cellId || 'no_action'}_${gameState.version}`;
+          if ((window as any).lastActionKey === actionKey) return;
+          (window as any).lastActionKey = actionKey;
+
           if (tStatus === 'WAITING_ROLL') {
-             setTimeout(() => engine.rollDice(), 1500);
+             setTimeout(() => {
+                const s = engine.getState();
+                if (s.turnStatus !== 'WAITING_ROLL' || s.currentPlayerId !== player.id) return;
+
+                engine.rollDice();
+             }, 1500);
           } else if (tStatus === 'ACTION_REQUIRED' && gameState.currentAction?.type === 'BUY') {
              setTimeout(() => {
-                const cell = gameState.cells[gameState.currentAction!.cellId!];
+                const s = engine.getState();
+                if (s.turnStatus !== 'ACTION_REQUIRED' || s.currentPlayerId !== player.id) return;
+
+                const cell = s.cells[s.currentAction!.cellId!];
                 if (player.balance >= (cell.price || 0) + (player.botStrategy === 'ECONOMICAL' ? 300 : 50)) {
                    engine.buyAsset();
                 } else {
@@ -396,22 +472,38 @@ export default function GamePage() {
              }, 1500);
           } else if (tStatus === 'END_TURN') {
              setTimeout(() => {
+                const s = engine.getState();
+                if (s.turnStatus !== 'END_TURN' || s.currentPlayerId !== player.id) return;
+
                 if (player.balance < 0) {
                    engine.surrender(player.id);
-                   return;
-                }
-                // Try upgrades
-                if (player.botStrategy === 'AGGRESSIVE') {
-                   const upgradable = gameState.cells.filter(c => c.ownerId === player.id && (c.upgradeLevel || 0) < 2);
-                   if (upgradable.length > 0 && player.balance > 300) {
-                      engine.upgradeAsset(upgradable[0].id);
+                } else {
+                   // Smarter upgrades
+                   const myAssets = s.cells.filter(c => c.ownerId === player.id);
+                   const mortgaged = myAssets.filter(c => c.isMortgaged);
+                   
+                   // Unmortgage if wealthy
+                   if (mortgaged.length > 0 && player.balance > (mortgaged[0].price || 100) * 1.5) {
+                      engine.unmortgageAsset(mortgaged[0].id);
                    }
+
+                   // Upgrade if monopoly owned
+                   const upgradable = s.cells.filter(c => c.ownerId === player.id && (c.upgradeLevel || 0) < 2);
+                   const colorToUpgrade = upgradable.find(u => {
+                       const set = s.cells.filter(c => c.type === CellType.ASSET && c.color === u.color);
+                       return set.every(c => c.ownerId === player.id && !c.isMortgaged);
+                   });
+
+                   if (colorToUpgrade && player.balance > 400) {
+                      engine.upgradeAsset(colorToUpgrade.id);
+                   }
+
+                   engine.nextTurn();
                 }
-                engine.nextTurn();
              }, 1000);
           }
        }
-    }, [gameState?.turnStatus, gameState?.currentPlayerId, gameState?.activeAuction?.turnIndex]);
+    }, [gameState?.turnStatus, gameState?.currentPlayerId, gameState?.activeAuction?.turnIndex, gameState?.pendingTrade]);
 
     // Save profile stats on game over
     useEffect(() => {
@@ -496,7 +588,9 @@ export default function GamePage() {
     };
 
     const handleSurrender = () => {
-      engineRef.current?.surrender(localPlayerId);
+      if (engineRef.current) {
+        engineRef.current.surrender(localPlayerId);
+      }
       setIsSurrenderModalOpen(false);
     };
     
@@ -650,7 +744,6 @@ export default function GamePage() {
     localStorage.setItem('tycoon_name', localPlayerName);
     localStorage.setItem('tycoon_color', localColor);
     localStorage.setItem('tycoon_avatar', localAvatar);
-    setIsSettingsOpen(false);
     
     if (gameState && !gameState.isStarted && engineRef.current) {
         engineRef.current.updatePlayerProfile(localPlayerId, {
@@ -672,95 +765,183 @@ export default function GamePage() {
 
   const { displayRoll } = useFastDiceRoller(gameState?.lastRoll, gameState?.turnStatus, handleDiceAnimationComplete);
 
-  if (isSettingsOpen) {
+  const TURN_DURATION = 30;
+  const [timeLeft, setTimeLeft] = useState(TURN_DURATION);
+
+  useEffect(() => {
+    if (!gameState?.turnStartedAt || !gameState?.isStarted || gameState?.turnStatus === 'GAME_OVER') {
+      // Avoid sync setState error
+      const resetTime = () => {
+         if (timeLeft !== TURN_DURATION) setTimeLeft(TURN_DURATION);
+      };
+      resetTime();
+      return;
+    }
+
+    const interval = setInterval(() => {
+      const elapsed = (Date.now() - (gameState.turnStartedAt || Date.now())) / 1000;
+      const remaining = Math.max(0, Math.ceil(TURN_DURATION - elapsed));
+      setTimeLeft(remaining);
+
+      const isHost = gameState.players.find(p => p.id === localPlayerId)?.isHost;
+      if (isHost && remaining <= 0 && engineRef.current) {
+        engineRef.current.handleTimeout();
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [gameState?.turnStartedAt, gameState?.turnStatus, localPlayerId, gameState?.isStarted]);
+
+  if (isProfileOpen) {
     return (
       <main className="fixed inset-0 flex flex-col items-center justify-center bg-[#1C1C1D] z-50 p-6 text-white text-center">
-        <div className="w-full max-w-sm space-y-8">
-          <h2 className="text-xl font-bold">Настройки</h2>
+        <div className="w-full max-w-sm space-y-6 bg-[#2C2C2E] p-6 rounded-3xl border border-white/5 max-h-[90vh] overflow-y-auto no-scrollbar">
+          <div className="flex justify-between items-center">
+            <h2 className="text-xl font-bold text-[#3390EC] uppercase tracking-widest">Профиль</h2>
+            <button onClick={() => { setIsProfileOpen(false); saveSettings(); }} className="text-gray-400 hover:text-white transition-colors">
+              ✕
+            </button>
+          </div>
           
-          <div className="space-y-4 text-left">
-            <div>
-              <p className="text-sm text-gray-400 mb-2">Псевдоним</p>
-              <input 
-                type="text"
-                value={localPlayerName}
-                onChange={(e) => setLocalPlayerName(e.target.value)}
-                className="w-full bg-[#2C2C2E] rounded-xl p-4 text-white outline-none focus:ring-2 focus:ring-[#3390EC] transition-all"
-                placeholder="Имя"
-                maxLength={8}
-              />
-            </div>
+          <div className="flex flex-col items-center gap-4">
+             <div className="w-20 h-20 rounded-full flex items-center justify-center font-bold text-3xl overflow-hidden shadow-lg border-2 border-[#3390EC]" style={{ backgroundColor: localColor }}>
+               {localAvatar ? (
+                  <img src={localAvatar} alt="Avatar" className="w-full h-full object-cover" />
+               ) : (
+                  localPlayerName.charAt(0).toUpperCase()
+               )}
+             </div>
+             <div>
+                <h3 className="text-2xl font-black">{localPlayerName || 'Игрок'}</h3>
+                <p className="text-xs text-gray-500 font-mono tracking-widest uppercase">ID: {localPlayerId.slice(0, 8)}</p>
+             </div>
+          </div>
+          
+          <div className="flex bg-[#1C1C1D] rounded-xl p-1">
+            <button 
+              className={`flex-1 py-2 text-sm font-bold uppercase rounded-lg transition-colors ${profileTab === 'stats' ? 'bg-[#3390EC] text-white' : 'text-gray-400 hover:text-white'}`}
+              onClick={() => setProfileTab('stats')}
+            >
+              Статистика
+            </button>
+            <button 
+              className={`flex-1 py-2 text-sm font-bold uppercase rounded-lg transition-colors ${profileTab === 'settings' ? 'bg-[#3390EC] text-white' : 'text-gray-400 hover:text-white'}`}
+              onClick={() => setProfileTab('settings')}
+            >
+              Настройки
+            </button>
+          </div>
 
-            <div>
-              <p className="text-sm text-gray-400 mb-2">Аватар</p>
-              <div className="flex gap-4 overflow-x-auto pb-4 no-scrollbar">
-                {[
-                  'Felix', 'Aneka', 'Caleb', 'Cookie', 'Charlie', 'Misty', 'Boots'
-                ].map(seed => {
-                  const url = `https://api.dicebear.com/7.x/pixel-art/svg?seed=${seed}`;
-                  return (
-                    <button 
-                      key={seed}
-                      onClick={() => setLocalAvatar(url)}
-                      className={`w-14 h-14 rounded-xl flex-shrink-0 transition-all border-2 ${localAvatar === url ? 'border-[#3390EC] scale-110 bg-[#3390EC]/10' : 'border-transparent bg-[#2C2C2E]'}`}
-                    >
-                      <img src={url} alt={seed} className="w-full h-full p-1" />
-                    </button>
-                  );
-                })}
-              </div>
-              <div className="mt-2">
-                 <input 
-                   type="text"
-                   placeholder="Или вставьте URL аватара"
-                   value={localAvatar}
-                   onChange={(e) => setLocalAvatar(e.target.value)}
-                   className="w-full bg-[#2C2C2E] p-3 rounded-xl text-xs text-gray-400 outline-none focus:ring-1 focus:ring-[#3390EC]"
-                 />
-              </div>
+          {profileTab === 'stats' && (
+            <div className="bg-[#1C1C1D] rounded-2xl p-4 space-y-4 text-left animate-in fade-in zoom-in-95">
+              {!userProfile ? (
+                <div className="flex justify-center p-4">
+                   <div className="w-8 h-8 border-4 border-[#3390EC] border-t-transparent rounded-full animate-spin" />
+                </div>
+              ) : (
+                <>
+                   <div className="flex justify-between items-center border-b border-white/5 pb-2">
+                      <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">Всего игр</span>
+                      <span className="text-lg font-black text-white">{userProfile.gamesPlayed || 0}</span>
+                   </div>
+                   <div className="flex justify-between items-center border-b border-white/5 pb-2">
+                      <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">Побед</span>
+                      <span className="text-lg font-black text-yellow-500">{userProfile.wins || 0}</span>
+                   </div>
+                   <div className="flex justify-between items-center border-b border-white/5 pb-2">
+                      <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">Пик капитала</span>
+                      <span className="text-lg font-black text-[#34C759]">${(userProfile.totalWealthPeak || 0).toLocaleString()}</span>
+                   </div>
+                   <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">Собрано аренды</span>
+                      <span className="text-lg font-black text-[#5E5CE6]">${(userProfile.totalRentsCollected || 0).toLocaleString()}</span>
+                   </div>
+                   
+                   {(userProfile.gamesPlayed || 0) > 0 && (
+                     <div className="pt-2 text-center">
+                       <span className="text-xs text-gray-500 font-bold">Винрейт: {Math.round(((userProfile.wins || 0) / userProfile.gamesPlayed) * 100)}%</span>
+                     </div>
+                   )}
+                </>
+              )}
             </div>
+          )}
 
-            <div className="flex items-center justify-between bg-[#2C2C2E] p-4 rounded-xl border border-white/5 mb-4">
-              <span className="text-sm font-bold text-white">Звук уведомлений</span>
-              <button 
-                onClick={() => setIsSoundEnabled(!isSoundEnabled)}
-                className={`w-12 h-6 rounded-full transition-colors relative ${isSoundEnabled ? 'bg-[#3390EC]' : 'bg-gray-600'}`}
-              >
-                <div 
-                  className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm transition-all ${isSoundEnabled ? 'left-[26px]' : 'left-[4px]'}`}
+          {profileTab === 'settings' && (
+            <div className="space-y-4 text-left animate-in fade-in slide-in-from-right-4">
+              <div>
+                <p className="text-sm text-gray-400 mb-2 font-bold uppercase tracking-wider">Псевдоним</p>
+                <input 
+                  type="text"
+                  value={localPlayerName}
+                  onChange={(e) => setLocalPlayerName(e.target.value)}
+                  className="w-full bg-[#1C1C1D] rounded-xl p-4 text-white outline-none focus:ring-2 focus:ring-[#3390EC] transition-all"
+                  placeholder="Ваше имя"
+                  maxLength={12}
                 />
-              </button>
-            </div>
+              </div>
 
-            <div>
-              <p className="text-sm text-gray-400 mb-2">Цвет</p>
-              <div className="flex gap-4 flex-wrap">
-                {['#3390EC', '#FF3B30', '#34C759', '#FF9500', '#AF52DE', '#FFCC00'].map(c => (
-                  <button 
-                    key={c}
-                    onClick={() => setLocalColor(c)}
-                    className={`w-10 h-10 rounded-full transition-transform ${localColor === c ? 'scale-125 ring-2 ring-white' : ''}`}
-                    style={{ backgroundColor: c }}
+              <div>
+                <p className="text-sm text-gray-400 mb-2 font-bold uppercase tracking-wider">Аватар</p>
+                <div className="flex gap-4 overflow-x-auto pb-4 no-scrollbar">
+                  {['Felix', 'Aneka', 'Caleb', 'Cookie', 'Charlie', 'Misty', 'Boots'].map(seed => {
+                    const url = `https://api.dicebear.com/7.x/pixel-art/svg?seed=${seed}`;
+                    return (
+                      <button 
+                        key={seed}
+                        onClick={() => setLocalAvatar(url)}
+                        className={`w-14 h-14 rounded-xl flex-shrink-0 transition-all border-2 ${localAvatar === url ? 'border-[#3390EC] scale-110 bg-[#3390EC]/10' : 'border-transparent bg-[#1C1C1D]'}`}
+                      >
+                        <img src={url} alt={seed} className="w-full h-full p-1" />
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="mt-2">
+                   <input 
+                     type="text"
+                     placeholder="Вставьте URL аватара"
+                     value={localAvatar}
+                     onChange={(e) => setLocalAvatar(e.target.value)}
+                     className="w-full bg-[#1C1C1D] p-3 rounded-xl text-xs text-gray-400 outline-none focus:ring-1 focus:ring-[#3390EC]"
+                   />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between bg-[#1C1C1D] p-4 rounded-xl border border-white/5 mb-4">
+                <span className="text-sm font-bold text-white uppercase tracking-wider">Звук</span>
+                <button 
+                  onClick={() => setIsSoundEnabled(!isSoundEnabled)}
+                  className={`w-12 h-6 rounded-full transition-colors relative ${isSoundEnabled ? 'bg-[#3390EC]' : 'bg-gray-600'}`}
+                >
+                  <div 
+                    className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm transition-all ${isSoundEnabled ? 'left-[26px]' : 'left-[4px]'}`}
                   />
-                ))}
+                </button>
+              </div>
+
+              <div>
+                <p className="text-sm text-gray-400 mb-2 font-bold uppercase tracking-wider">Цвет</p>
+                <div className="flex gap-4 flex-wrap">
+                  {['#3390EC', '#FF3B30', '#34C759', '#FF9500', '#AF52DE', '#FFCC00'].map(c => (
+                    <button 
+                      key={c}
+                      onClick={() => setLocalColor(c)}
+                      className={`w-10 h-10 rounded-full transition-transform ${localColor === c ? 'scale-125 ring-2 ring-white' : ''}`}
+                      style={{ backgroundColor: c }}
+                    />
+                  ))}
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
-          <div className="pt-8 flex flex-col gap-3">
-            <button 
-              onClick={saveSettings}
-              className="w-full bg-[#3390EC] text-white p-4 rounded-xl font-bold hover:brightness-110 active:scale-95 transition-all"
-            >
-              Сохранить
-            </button>
-            <button 
-              onClick={() => setIsSettingsOpen(false)}
-              className="w-full text-gray-400 p-4 font-bold hover:text-white"
-            >
-              Отмена
-            </button>
-          </div>
+          <button 
+            onClick={() => { setIsProfileOpen(false); saveSettings(); }}
+            className="w-full bg-[#3390EC] text-white p-4 rounded-xl font-bold hover:brightness-110 active:scale-95 transition-all uppercase tracking-widest mt-4"
+          >
+            {profileTab === 'settings' ? 'Сохранить' : 'Закрыть'}
+          </button>
         </div>
       </main>
     );
@@ -802,75 +983,6 @@ export default function GamePage() {
     );
   }
 
-  if (isProfileOpen) {
-    return (
-      <main className="fixed inset-0 flex flex-col items-center justify-center bg-[#1C1C1D] z-50 p-6 text-white text-center">
-        <div className="w-full max-w-sm space-y-8 bg-[#2C2C2E] p-6 rounded-3xl border border-white/5">
-          <div className="flex justify-between items-center">
-            <h2 className="text-xl font-bold text-[#3390EC] uppercase tracking-widest">Профиль</h2>
-            <button onClick={() => setIsProfileOpen(false)} className="text-gray-400 hover:text-white transition-colors">
-              ✕
-            </button>
-          </div>
-          
-          <div className="flex flex-col items-center gap-4">
-             <div className="w-20 h-20 rounded-full flex items-center justify-center font-bold text-3xl overflow-hidden shadow-lg" style={{ backgroundColor: localColor }}>
-               {localAvatar ? (
-                  <img src={localAvatar} alt="Avatar" className="w-full h-full object-cover" />
-               ) : (
-                  localPlayerName.charAt(0).toUpperCase()
-               )}
-             </div>
-             <div>
-                <h3 className="text-2xl font-black">{localPlayerName}</h3>
-                <p className="text-xs text-gray-500 font-mono tracking-widest uppercase">ID: {localPlayerId.slice(0, 8)}</p>
-             </div>
-          </div>
-          
-          <div className="bg-[#1C1C1D] rounded-2xl p-4 space-y-4 text-left">
-            {!userProfile ? (
-              <div className="flex justify-center p-4">
-                 <div className="w-8 h-8 border-4 border-[#3390EC] border-t-transparent rounded-full animate-spin" />
-              </div>
-            ) : (
-              <>
-                 <div className="flex justify-between items-center border-b border-white/5 pb-2">
-                    <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">Всего игр</span>
-                    <span className="text-lg font-black text-white">{userProfile.gamesPlayed || 0}</span>
-                 </div>
-                 <div className="flex justify-between items-center border-b border-white/5 pb-2">
-                    <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">Побед</span>
-                    <span className="text-lg font-black text-yellow-500">{userProfile.wins || 0}</span>
-                 </div>
-                 <div className="flex justify-between items-center border-b border-white/5 pb-2">
-                    <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">Пик капитала</span>
-                    <span className="text-lg font-black text-[#34C759]">${(userProfile.totalWealthPeak || 0).toLocaleString()}</span>
-                 </div>
-                 <div className="flex justify-between items-center">
-                    <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">Собрано аренды</span>
-                    <span className="text-lg font-black text-[#5E5CE6]">${(userProfile.totalRentsCollected || 0).toLocaleString()}</span>
-                 </div>
-                 
-                 {(userProfile.gamesPlayed || 0) > 0 && (
-                   <div className="pt-2 text-center">
-                     <span className="text-xs text-gray-500 font-bold">Винрейт: {Math.round(((userProfile.wins || 0) / userProfile.gamesPlayed) * 100)}%</span>
-                   </div>
-                 )}
-              </>
-            )}
-          </div>
-
-          <button 
-            onClick={() => setIsProfileOpen(false)}
-            className="w-full bg-[#3390EC] text-white p-4 rounded-xl font-bold hover:brightness-110 active:scale-95 transition-all uppercase tracking-widest"
-          >
-            Закрыть
-          </button>
-        </div>
-      </main>
-    );
-  }
-
   // --- HTML DOM BOARD CALCULATION ---
   const cellsToDraw = gameState ? gameState.cells : BOARD_CELLS;
   const isLocalTurn = gameState?.currentPlayerId === localPlayerId;
@@ -893,7 +1005,7 @@ export default function GamePage() {
               </div>
               
               <div className="flex gap-2">
-                <div className="flex-1 bg-[#2C2C2E] rounded-2xl p-4 flex items-center justify-between cursor-pointer" onClick={() => setIsSettingsOpen(true)}>
+                <div className="flex-1 bg-[#2C2C2E] rounded-2xl p-4 flex items-center justify-between cursor-pointer" onClick={() => { setIsProfileOpen(true); setProfileTab('settings'); }}>
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg overflow-hidden shrink-0" style={{ backgroundColor: localColor }}>
                       {localAvatar ? (
@@ -1025,7 +1137,10 @@ export default function GamePage() {
       <div className="h-[80px] bg-[#1C1C1D] z-10 flex items-center justify-between px-4 sticky top-0 shrink-0 border-b border-white/5">
         <div className="flex items-center gap-3">
           <button 
-            onClick={() => gameState?.isStarted ? setIsSurrenderModalOpen(true) : setIsSettingsOpen(true)} 
+            onClick={() => {
+              if (gameState?.isStarted) setIsSurrenderModalOpen(true);
+              else { setIsProfileOpen(true); setProfileTab('settings'); }
+            }} 
             className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg shadow-sm cursor-pointer overflow-hidden" 
             style={{ backgroundColor: localColor }}
           >
@@ -1447,6 +1562,20 @@ export default function GamePage() {
 
       {/* ACTION AREA BOTTOM (Fixed height) */}
       <div className="h-[120px] shrink-0 p-4 relative z-20">
+         {gameState && gameState.isStarted && gameState.turnStatus !== 'GAME_OVER' && gameState.turnStartedAt && (
+            <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-full mb-2 w-full max-w-[200px] flex flex-col items-center gap-1">
+               <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden">
+                  <motion.div 
+                    initial={{ width: "100%" }}
+                    animate={{ width: `${(timeLeft / TURN_DURATION) * 100}%` }}
+                    className={`h-full transition-colors ${timeLeft < 10 ? 'bg-red-500' : 'bg-[#3390EC]'}`}
+                  />
+               </div>
+               <span className={`text-[10px] font-black uppercase tracking-[0.2em] ${timeLeft < 10 ? 'text-red-500 animate-pulse' : 'text-gray-500'}`}>
+                  Оставшееся время: {timeLeft}с
+               </span>
+            </div>
+         )}
          {gameState && (
             <AnimatePresence mode="popLayout">
                {gameState.turnStatus === 'WAITING_ROLL' && isLocalTurn && (
@@ -1493,11 +1622,6 @@ export default function GamePage() {
                                 onClick={() => {
                                    if (confirm('Вы уверены, что хотите объявить банкротство? Вы выйдете из игры, а ваши активы сгорят.')) {
                                       engineRef.current?.declareBankrupt();
-                                      if (engineRef.current) {
-                                         const s = engineRef.current.getState();
-                                         setGameState(s);
-                                         netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
-                                      }
                                    }
                                 }}
                                 className="w-full max-w-sm h-12 bg-red-500/10 text-red-500 rounded-xl font-bold uppercase active:scale-[0.98] transition-transform border-2 border-red-500/30"
@@ -1516,9 +1640,17 @@ export default function GamePage() {
           {gameState && !isLocalTurn && (
             <div className="w-full h-full flex flex-col items-center justify-center pb-6 text-center">
               {gameState.players.find(p => p.id === localPlayerId)?.isBankrupt ? (
-                <div className="flex flex-col items-center gap-1">
-                  <span className="text-xl font-black text-[#FF3B30] tracking-tighter">СЕТЕВОЕ ФИАСКО</span>
-                  <span className="text-xs text-gray-500 uppercase font-bold">Вы выбыли из борьбы за рынок</span>
+                <div className="flex flex-col items-center gap-3">
+                  <div className="flex flex-col items-center">
+                    <span className="text-xl font-black text-[#FF3B30] tracking-tighter">СЕТЕВОЕ ФИАСКО</span>
+                    <span className="text-xs text-gray-500 uppercase font-bold">Вы выбыли из борьбы</span>
+                  </div>
+                  <button 
+                    onClick={exitRoom}
+                    className="px-6 h-10 bg-gray-800 text-white rounded-full text-[10px] font-black uppercase tracking-widest active:scale-[0.98] transition-all hover:bg-[#FF3B30]"
+                  >
+                    Выйти из комнаты
+                  </button>
                 </div>
               ) : (
                 <div className="flex items-center gap-2">
@@ -1542,6 +1674,19 @@ export default function GamePage() {
           >
             <div className="w-12 h-1.5 bg-gray-600 rounded-full mx-auto mb-6" />
             
+            <div className="absolute top-4 right-6 flex flex-col items-end gap-1">
+               <span className={`text-[10px] font-black uppercase tracking-widest ${timeLeft < 10 ? 'text-red-500 animate-pulse' : 'text-gray-500'}`}>
+                  {timeLeft}с
+               </span>
+               <div className="w-16 h-1 bg-white/10 rounded-full overflow-hidden">
+                  <motion.div 
+                    initial={{ width: "100%" }}
+                    animate={{ width: `${(timeLeft / TURN_DURATION) * 100}%` }}
+                    className={`h-full transition-colors ${timeLeft < 10 ? 'bg-red-500' : 'bg-[#3390EC]'}`}
+                  />
+               </div>
+            </div>
+
             <div className="text-center mb-6">
               <h3 className="text-2xl font-black text-white uppercase tracking-widest mb-1">АУКЦИОН</h3>
               <p className="text-gray-400 font-medium">Ожесточенные торги за <span className="text-[#3390EC] font-bold">{gameState.cells[gameState.activeAuction.cellId].name}</span></p>
@@ -1580,16 +1725,7 @@ export default function GamePage() {
                         <button 
                           key={add}
                           onClick={() => {
-                             const bidMsg = { type: 'AUCTION_BID', playerId: localPlayerId, bidAmount: gameState.activeAuction!.currentBid + add };
                              engineRef.current?.auctionBid(localPlayerId, gameState.activeAuction!.currentBid + add);
-                             // Need to handle broadcast directly if engine updates state?
-                             // Wait, engineRef updates local state, we need to broadcast. No, we are using the generic action wrapper later maybe?
-                             // Let's just do it directly here:
-                             if (engineRef.current) {
-                                const s = engineRef.current.getState();
-                                setGameState(s);
-                                netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
-                             }
                           }}
                           className="flex-1 bg-[#3390EC]/10 text-[#3390EC] border-2 border-[#3390EC]/30 rounded-xl py-3 font-black text-sm uppercase active:scale-[0.98] transition-transform"
                         >
@@ -1601,11 +1737,6 @@ export default function GamePage() {
                      <button
                         onClick={() => {
                            engineRef.current?.auctionPass(localPlayerId);
-                           if (engineRef.current) {
-                                const s = engineRef.current.getState();
-                                setGameState(s);
-                                netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
-                             }
                         }}
                         className="h-14 px-6 bg-red-500/10 text-red-500 border-2 border-red-500/30 rounded-xl font-bold uppercase active:scale-[0.98] transition-transform"
                      >
@@ -1774,11 +1905,6 @@ export default function GamePage() {
                      <button 
                        onClick={() => {
                           engineRef.current?.rejectTrade();
-                          if (engineRef.current) {
-                             const s = engineRef.current.getState();
-                             setGameState(s);
-                             netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
-                          }
                        }}
                        className="flex-1 h-14 bg-gray-800 text-gray-400 rounded-2xl font-bold uppercase active:scale-95 transition-transform"
                      >
@@ -1789,11 +1915,6 @@ export default function GamePage() {
                           const player = gameState.players.find(p => p.id === localPlayerId);
                           if (player && player.balance >= gameState.pendingTrade!.price) {
                              engineRef.current?.acceptTrade();
-                             if (engineRef.current) {
-                                const s = engineRef.current.getState();
-                                setGameState(s);
-                                netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
-                             }
                           } else {
                              alert("Недостаточно средств!");
                           }
@@ -1870,11 +1991,6 @@ export default function GamePage() {
                       if (isNaN(priceNum) || priceNum < 0) return;
                       
                       engineRef.current?.proposeTrade(tradeSetup.cellId, tradeTarget, priceNum);
-                      if (engineRef.current) {
-                         const s = engineRef.current.getState();
-                         setGameState(s);
-                         netRef.current?.broadcast('GAME_STATE', s, localPlayerId);
-                      }
                       setTradeSetup(null);
                       setZoomedCell(null);
                    }}
