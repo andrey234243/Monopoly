@@ -75,6 +75,8 @@ export default function GamePage() {
   const [chatInput, setChatInput] = useState('');
   const [isCloudRestoreOpen, setIsCloudRestoreOpen] = useState(false);
   const [cloudRestoreId, setCloudRestoreId] = useState('');
+  const [viewingPlayerProfileId, setViewingPlayerProfileId] = useState<string | null>(null);
+  const [viewingPlayerProfileData, setViewingPlayerProfileData] = useState<any | null>(null);
   const [userProfile, setUserProfile] = useState<{ gamesPlayed: number, wins: number, totalWealthPeak: number, totalRentsCollected: number } | null>(null);
   const [hasSavedProfileStats, setHasSavedProfileStats] = useState(false);
   const [tradeSetup, setTradeSetup] = useState<{ cellId: number } | null>(null);
@@ -257,9 +259,12 @@ export default function GamePage() {
         await signInAnonymously(auth);
       } catch (e: any) {
         if (e.code === 'auth/admin-restricted-operation') {
-           console.error('FIREBASE SETUP REQUIRED: Please enable "Anonymous" provider in Firebase Console -> Authentication -> Sign-in methods.');
+           const msg = 'FIREBASE SETUP REQUIRED: Please enable "Anonymous" provider in Firebase Console -> Authentication -> Sign-in methods.';
+           console.error(msg);
+           setStatus('ОШИБКА: Включите Anonymous Auth в Firebase Console!');
         } else {
            console.error('Firebase Auth Error:', e);
+           setStatus('Ошибка авторизации');
         }
       }
     };
@@ -655,6 +660,32 @@ export default function GamePage() {
        }
     }, [isProfileOpen]);
 
+    // Fetch viewed player profile
+    useEffect(() => {
+       if (viewingPlayerProfileId) {
+          setViewingPlayerProfileData(null);
+          const fetchViewedProfile = async () => {
+             try {
+                const { doc, getDoc } = await import('firebase/firestore');
+                const { db } = await import('@/lib/firebase');
+                
+                const userRef = doc(db, 'users', viewingPlayerProfileId);
+                const userSnap = await getDoc(userRef);
+                if (userSnap.exists()) {
+                   setViewingPlayerProfileData(userSnap.data());
+                } else {
+                   setViewingPlayerProfileData({ notFound: true });
+                }
+             } catch (e) {
+                console.error("Failed to load viewed profile", e);
+             }
+          };
+          fetchViewedProfile();
+       } else {
+          setViewingPlayerProfileData(null);
+       }
+    }, [viewingPlayerProfileId]);
+
     const handleCloudRestore = async () => {
        if (!cloudRestoreId.trim()) return;
        try {
@@ -975,6 +1006,83 @@ export default function GamePage() {
          window.open(url, '_blank');
       } catch(e) { console.error(e); }
   };
+
+  if (viewingPlayerProfileId) {
+    const gamePlayer = gameState?.players?.find(p => p.id === viewingPlayerProfileId);
+    const playerAssets = gameState?.cells?.filter(c => c.ownerId === viewingPlayerProfileId) || [];
+    
+    return (
+      <main className="fixed inset-0 flex flex-col items-center justify-center bg-[#1C1C1D]/80 backdrop-blur-sm z-[60] p-6 text-white text-center">
+        <div className="w-full max-w-sm space-y-6 bg-[#2C2C2E] p-6 rounded-3xl border border-white/5 max-h-[90vh] overflow-y-auto no-scrollbar shadow-2xl animate-in zoom-in-95">
+          <div className="flex justify-between items-center">
+            <h2 className="text-xl font-bold text-[#3390EC] uppercase tracking-widest">Игрок</h2>
+            <button onClick={() => setViewingPlayerProfileId(null)} className="text-gray-400 hover:text-white transition-colors">
+              ✕
+            </button>
+          </div>
+          
+          <div className="flex flex-col items-center gap-4">
+             <div className="w-20 h-20 rounded-full flex items-center justify-center font-bold text-3xl overflow-hidden shadow-lg border-2 border-[#1C1C1D]" style={{ backgroundColor: gamePlayer?.color || '#3390EC' }}>
+               {viewingPlayerProfileData?.avatarUrl || gamePlayer?.avatarUrl ? (
+                  <img src={viewingPlayerProfileData?.avatarUrl || gamePlayer?.avatarUrl} alt="Avatar" className="w-full h-full object-cover" />
+               ) : (
+                  (viewingPlayerProfileData?.nickname || gamePlayer?.name || '?').charAt(0).toUpperCase()
+               )}
+             </div>
+             <div className="text-center">
+               <h3 className="text-2xl font-black">{viewingPlayerProfileData?.nickname || gamePlayer?.name || 'Неизвестный'}</h3>
+               <p className="text-xs text-gray-500 font-mono mt-1">{viewingPlayerProfileId}</p>
+             </div>
+          </div>
+
+          <div className="flex bg-[#1C1C1D] rounded-xl p-1 gap-1">
+             <div className="flex-1 text-center py-2">
+                <p className="text-[10px] text-gray-500 uppercase font-bold">Игр</p>
+                <p className="font-black text-lg">{viewingPlayerProfileData?.gamesPlayed || 0}</p>
+             </div>
+             <div className="flex-1 text-center py-2 bg-white/5 rounded-lg">
+                <p className="text-[10px] text-gray-500 uppercase font-bold">Побед</p>
+                <p className="font-black text-lg text-yellow-500">{viewingPlayerProfileData?.wins || 0}</p>
+             </div>
+          </div>
+          
+          {gameState?.isStarted && (
+            <div className="bg-[#1C1C1D] p-3 rounded-xl border border-white/5">
+                <p className="text-xs text-gray-500 font-bold uppercase tracking-wider px-2 border-b border-white/5 pb-1 mb-2 text-left">В текущей игре</p>
+                <div className="flex justify-between items-center mb-3 px-2">
+                   <p className="text-sm font-bold">Баланс:</p>
+                   <p className="text-[#34C759] font-black">${gamePlayer?.balance || 0}</p>
+                </div>
+                <div className="flex flex-wrap gap-1 px-2">
+                   {playerAssets.length === 0 ? (
+                      <p className="text-xs text-gray-500 italic">Нет активов</p>
+                   ) : (
+                      playerAssets.map((asset, i) => (
+                         <div key={i} className="text-[10px] bg-[#2C2C2E] px-2 py-1 rounded font-bold uppercase border border-gray-700/50 flex gap-1 items-center">
+                            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: asset.color }}></span>
+                            {asset.name}
+                         </div>
+                      ))
+                   )}
+                </div>
+            </div>
+          )}
+
+          {viewingPlayerProfileId !== localPlayerId && !viewingPlayerProfileData?.notFound && (
+              <button 
+                onClick={() => {
+                   sendFriendRequest({ id: viewingPlayerProfileId, nickname: viewingPlayerProfileData?.nickname, avatarUrl: viewingPlayerProfileData?.avatarUrl });
+                   setViewingPlayerProfileId(null);
+                }}
+                className="w-full bg-[#3390EC]/10 text-[#3390EC] p-3 rounded-xl font-bold hover:bg-[#3390EC]/20 active:scale-95 transition-all text-sm uppercase tracking-widest mt-4"
+              >
+                Отправить заявку в друзья
+              </button>
+          )}
+        </div>
+      </main>
+    );
+  }
 
   if (isProfileOpen) {
     return (
@@ -1470,7 +1578,11 @@ export default function GamePage() {
 
           <div className="flex items-center gap-2 pr-2">
             {gameState?.players.map(p => (
-              <div key={p.id} className={`flex items-center gap-1.5 bg-[#2C2C2E]/50 px-2 py-1 rounded-full border ${p.id === gameState.currentPlayerId ? 'border-[#3390EC]' : 'border-white/5'}`}>
+              <button 
+                 key={p.id} 
+                 onClick={() => setViewingPlayerProfileId(p.id)}
+                 className={`flex items-center gap-1.5 bg-[#2C2C2E]/50 px-2 py-1 rounded-full border active:scale-95 transition-transform ${p.id === gameState.currentPlayerId ? 'border-[#3390EC]' : 'border-white/5'}`}
+              >
                 <div className="w-5 h-5 rounded-full flex items-center justify-center font-bold text-[8px] overflow-hidden" style={{ backgroundColor: p.color }}>
                   {p.avatarUrl ? (
                     <img src={p.avatarUrl} alt={p.name} className="w-full h-full object-cover" />
@@ -1478,13 +1590,13 @@ export default function GamePage() {
                     p.name.charAt(0).toUpperCase()
                   )}
                 </div>
-                <div className="flex flex-col -gap-0.5">
+                <div className="flex flex-col -gap-0.5 text-left">
                   <span className={`text-[8px] font-black uppercase tracking-tighter ${p.id === gameState.currentPlayerId ? 'text-[#3390EC]' : 'text-gray-500'}`}>
                     {p.name.split(' ')[0]}
                   </span>
                   <span className="text-[10px] font-black text-white leading-none">${p.balance}</span>
                 </div>
-              </div>
+              </button>
             ))}
           </div>
         </div>
@@ -1531,7 +1643,7 @@ export default function GamePage() {
                      <div className="space-y-2 bg-[#2C2C2E]/50 p-4 rounded-2xl border border-white/5">
                        {gameState.players.map(p => (
                          <div key={p.id} className="flex items-center justify-between py-1">
-                           <div className="flex items-center gap-3">
+                           <button onClick={() => setViewingPlayerProfileId(p.id)} className="flex items-center gap-3 active:scale-95 transition-transform text-left">
                              <div className="w-8 h-8 rounded-full overflow-hidden flex items-center justify-center border-2 border-[#1C1C1D] shadow-inner" style={{ backgroundColor: p.color }}>
                                {p.avatarUrl ? (
                                  <img src={p.avatarUrl} alt={p.name} className="w-full h-full object-cover" />
@@ -1540,7 +1652,7 @@ export default function GamePage() {
                                )}
                              </div>
                              <span className="text-xs font-black text-white uppercase tracking-tight">{p.name} {p.id === localPlayerId ? '(ВЫ)' : ''}</span>
-                           </div>
+                           </button>
                            {p.isHost && <span className="text-[8px] text-[#3390EC] font-black uppercase tracking-widest">Host</span>}
                          </div>
                        ))}
@@ -2294,7 +2406,7 @@ export default function GamePage() {
               <div className="space-y-3 bg-[#2C2C2E] p-4 rounded-2xl">
                  {gameState?.players.map(p => (
                    <div key={p.id} className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
+                      <button onClick={() => setViewingPlayerProfileId(p.id)} className="flex items-center gap-3 active:scale-95 transition-transform text-left">
                          <div className="w-8 h-8 rounded-full overflow-hidden flex items-center justify-center" style={{ backgroundColor: p.color }}>
                             {p.avatarUrl ? (
                                <img src={p.avatarUrl} alt={p.name} className="w-full h-full object-cover" />
@@ -2303,7 +2415,7 @@ export default function GamePage() {
                             )}
                          </div>
                          <span className="font-bold">{p.name} {p.id === localPlayerId ? '(Вы)' : ''}</span>
-                      </div>
+                      </button>
                       {p.isHost && <span className="text-[10px] bg-[#3390EC] px-2 py-0.5 rounded-full font-black uppercase">Хост</span>}
                    </div>
                  ))}
