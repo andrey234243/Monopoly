@@ -218,6 +218,8 @@ export class GameEngine {
     const playerIndex = this.state.players.findIndex(p => p.id === this.state.currentPlayerId);
     const player = this.state.players[playerIndex];
 
+    this.addChatMessage('system', 'Система', `${player.name} бросил(а) ${d1} и ${d2}.`);
+
     if (player.inJail) {
       if (d1 === d2) {
         player.inJail = false;
@@ -466,7 +468,11 @@ export class GameEngine {
     }
     
     const cellId = this.state.currentAction.cellId;
-    
+    const player = this.state.players.find(p => p.id === this.state.currentPlayerId);
+    if (player) {
+      this.addChatMessage('system', 'Система', `${player.name} отказывается от покупки ${this.state.cells[cellId].name}.`);
+    }
+
     // Start Auction
     const activePlayers = this.state.players.filter(p => !p.isBankrupt).map(p => p.id);
     this.state.activeAuction = {
@@ -701,6 +707,11 @@ export class GameEngine {
         offerCellIds,
         requestCellIds
      };
+
+     const targetPlayer = this.state.players.find(p => p.id === toPlayerId);
+     if (currentPlayer && targetPlayer) {
+        this.addChatMessage('system', 'Сделка', `${currentPlayer.name} предлагает сделку игроку ${targetPlayer.name}.`);
+     }
 
      this.notifyStateChange(prevState);
   }
