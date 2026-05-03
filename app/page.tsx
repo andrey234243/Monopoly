@@ -126,11 +126,21 @@ export default function GamePage() {
         let tmaAvatar = '';
         
         try {
-           const WebApp = (await import('@twa-dev/sdk')).default;
-           if (WebApp.initDataUnsafe?.user) {
-              const u = WebApp.initDataUnsafe.user;
-              tmaName = u.first_name || u.username || '';
-              if (u.photo_url) tmaAvatar = u.photo_url;
+           let user = null;
+           // Try SDK
+           try {
+              const WebApp = (await import('@twa-dev/sdk')).default;
+              if (WebApp.initDataUnsafe?.user) user = WebApp.initDataUnsafe.user;
+           } catch(e){}
+           
+           // Fallback to global
+           if (!user && typeof window !== 'undefined' && (window as any).Telegram?.WebApp?.initDataUnsafe?.user) {
+              user = (window as any).Telegram.WebApp.initDataUnsafe.user;
+           }
+           
+           if (user) {
+              tmaName = user.first_name || user.username || '';
+              if (user.photo_url) tmaAvatar = user.photo_url;
            }
         } catch(e){}
 
@@ -142,13 +152,17 @@ export default function GamePage() {
         setLocalPlayerId(localId!);
 
         const savedName = localStorage.getItem('tycoon_name');
-        setLocalPlayerName(savedName || tmaName || `Игрок`);
+        const finalName = tmaName || savedName || `Игрок`;
+        setLocalPlayerName(finalName);
+        if (tmaName) localStorage.setItem('tycoon_name', tmaName);
 
         const savedColor = localStorage.getItem('tycoon_color');
         setLocalColor(savedColor || '#3390EC');
 
         const savedAvatar = localStorage.getItem('tycoon_avatar');
-        setLocalAvatar(savedAvatar || tmaAvatar || `https://api.dicebear.com/7.x/pixel-art/svg?seed=${localId}`);
+        const finalAvatar = tmaAvatar || savedAvatar || `https://api.dicebear.com/7.x/pixel-art/svg?seed=${localId}`;
+        setLocalAvatar(finalAvatar);
+        if (tmaAvatar) localStorage.setItem('tycoon_avatar', tmaAvatar);
 
         const savedRooms = localStorage.getItem('tycoon_recent_rooms');
         if (savedRooms) setRecentRooms(JSON.parse(savedRooms));
@@ -228,16 +242,20 @@ export default function GamePage() {
         WebApp.expand();
         WebApp.headerColor = '#1C1C1D';
         WebApp.backgroundColor = '#1C1C1D';
-        
-        try {
-          const { signInAnonymously } = await import('firebase/auth');
-          const { auth } = await import('@/lib/firebase');
-          await signInAnonymously(auth);
-        } catch (e) {
-          console.error('Firebase Auth Error:', e);
-        }
       } catch (e) {
         console.error('Failed to init TMA SDK', e);
+      }
+      
+      try {
+        const { signInAnonymously } = await import('firebase/auth');
+        const { auth } = await import('@/lib/firebase');
+        await signInAnonymously(auth);
+      } catch (e: any) {
+        if (e.code === 'auth/admin-restricted-operation') {
+           console.error('FIREBASE SETUP REQUIRED: Please enable "Anonymous" provider in Firebase Console -> Authentication -> Sign-in methods.');
+        } else {
+           console.error('Firebase Auth Error:', e);
+        }
       }
     };
 
@@ -601,15 +619,19 @@ export default function GamePage() {
              try {
                 const { doc, getDoc } = await import('firebase/firestore');
                 const { db, auth } = await import('@/lib/firebase');
-                if (!auth.currentUser) return;
+                const { onAuthStateChanged } = await import('firebase/auth');
                 
-                const userRef = doc(db, 'users', auth.currentUser.uid);
-                const userSnap = await getDoc(userRef);
-                if (userSnap.exists()) {
-                   setUserProfile(userSnap.data() as any);
-                } else {
-                   setUserProfile({ gamesPlayed: 0, wins: 0, totalWealthPeak: 0, totalRentsCollected: 0 });
-                }
+                onAuthStateChanged(auth, async (user) => {
+                  if (user) {
+                    const userRef = doc(db, 'users', user.uid);
+                    const userSnap = await getDoc(userRef);
+                    if (userSnap.exists()) {
+                       setUserProfile(userSnap.data() as any);
+                    } else {
+                       setUserProfile({ gamesPlayed: 0, wins: 0, totalWealthPeak: 0, totalRentsCollected: 0 });
+                    }
+                  }
+                });
              } catch (e) {
                 console.error("Failed to load profile", e);
              }
