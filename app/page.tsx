@@ -2028,16 +2028,16 @@ export default function GamePage() {
                               
                               <div className={`flex-1 flex w-full h-full items-center justify-center ${isBottom ? 'flex-col' : isTop ? 'flex-col-reverse' : isLeft ? 'flex-row-reverse' : 'flex-row'}`}>
                                   {/* Logo Area */}
-                                  <div className="flex-1 flex items-center justify-center w-full h-full">
-                                     <div className="w-8 h-8 sm:w-10 sm:h-10 md:w-12 md:h-12 rounded-lg flex items-center justify-center bg-white border border-gray-200 relative overflow-hidden group-hover:scale-110 transition-transform shadow-sm" 
+                                  <div className="flex-1 flex items-center justify-center w-full h-full overflow-hidden min-h-0 min-w-0">
+                                     <div className="w-5 h-5 xs:w-6 xs:h-6 sm:w-8 sm:h-8 md:w-12 md:h-12 shrink-0 rounded flex items-center justify-center bg-white border border-gray-200 relative overflow-hidden group-hover:scale-110 transition-transform shadow-sm" 
                                           style={{ boxShadow: cell.color ? `inset 0 0 10px ${cell.color}15` : undefined }}>
                                          {/* Soft Glow */}
                                          <div className="absolute inset-0 opacity-[0.15] blur-md" style={{ backgroundColor: cell.color || '#3390EC' }} />
                                          
                                          {cell.logoUrl ? (
-                                           <img src={cell.logoUrl} alt={cell.name} className="w-[85%] h-[85%] object-contain drop-shadow-md z-10" />
+                                           <img src={cell.logoUrl} alt={cell.name} className="absolute inset-x-[10%] inset-y-[10%] w-[80%] h-[80%] object-contain drop-shadow-md z-10" />
                                          ) : (
-                                           <span className="text-sm sm:text-base md:text-xl font-black uppercase drop-shadow-sm z-10" 
+                                           <span className="text-[10px] sm:text-base md:text-xl font-black uppercase drop-shadow-sm z-10" 
                                                  style={{ color: cell.color || '#333' }}>
                                                {cell.name.charAt(0)}
                                            </span>
